@@ -4,6 +4,7 @@
 #include "graph.hpp"
 #include "types.hpp"
 
+#include <utility>
 #include <vector>
 
 namespace teegnn {
@@ -12,6 +13,8 @@ class ScaledPermutation {
 public:
     ScaledPermutation() = default;
     ScaledPermutation(std::vector<int> permutation, std::vector<double> scale);
+    ScaledPermutation(ScaledPermutation&& other);
+    ScaledPermutation& operator=(ScaledPermutation&& other);
 
     static ScaledPermutation random(int dim, RandomEngine& rng);
 
@@ -31,6 +34,10 @@ private:
     std::vector<double> scale_;
 };
 
+Matrix apply_SPM(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x);
+
+Matrix apply_SPM_inv(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x);
+
 struct LowRankMask {
     Matrix u;
     Matrix v;
@@ -39,32 +46,37 @@ struct LowRankMask {
     Matrix ahat_times_mask(const Graph& graph) const;
 };
 
-LowRankMask make_low_rank_mask(int rows, int cols, int rank, RandomEngine& rng, double amplitude = 0.02);
+LowRankMask make_low_rank_mask(int rows, int cols, int rank, RandomEngine& rng);
 
 class SDIMMask {
 public:
     SDIMMask() = default;
-    SDIMMask(ScaledPermutation p, Vector u, Vector v);
+    SDIMMask(ScaledPermutation p, Vector h);
+    SDIMMask(const SDIMMask& other) = delete;
+    SDIMMask(SDIMMask&& other);
+    SDIMMask& operator=(SDIMMask&& other);
 
     static SDIMMask random(int dim, RandomEngine& rng);
 
     int dim() const { return p_.dim(); }
-    Matrix apply_left(const Matrix& x) const;
-    Matrix apply_left_inv(const Matrix& x) const;
-    Matrix apply_right(const Matrix& x) const;
-    Matrix apply_right_inv(const Matrix& x) const;
-    Matrix materialize() const;
+    double value(int index) const { return p_.scale()[static_cast<std::size_t>(index)]; }
+    double h(int index) const { return h_(static_cast<std::size_t>(index)); }
+    int perm(int index) const { return p_.permutation()[static_cast<std::size_t>(index)]; }
+    double denominator() const { return denominator_; }
 
 private:
     ScaledPermutation p_;
-    Vector u_;
-    Vector v_;
+    Vector h_;
     double denominator_ = 1.0;
 };
 
+Matrix apply_SDIM(const SDIMMask& L, const SDIMMask& R, const Matrix& x);
+
+Matrix apply_SDIM_inv(const SDIMMask& L, const SDIMMask& R, const Matrix& x);
+
 struct ProtectedGraphShares {
-    std::vector<WeightedEdge> a1;
-    std::vector<WeightedEdge> a2;
+    std::vector<std::vector<std::pair<int, double>>> a1;
+    std::vector<std::vector<std::pair<int, double>>> a2;
     std::size_t confusion_edges = 0;
 };
 

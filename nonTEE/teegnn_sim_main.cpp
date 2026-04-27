@@ -2,13 +2,16 @@
 #include "dataset_loader.hpp"
 #include "gcn_ops.hpp"
 #include "masks.hpp"
+#include "types.hpp"
 
 #include <chrono>
 #include <cmath>
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -18,6 +21,46 @@ struct Options {
     double confusion_rate = 0.0;
     int mask_rank = 2;
     std::uint64_t seed = 1;
+};
+
+struct MaskedTensorShares {
+    teegnn::Matrix share1;
+    teegnn::Matrix share2;
+};
+
+struct MaskMatrices {
+    int node_count = 0;
+    int feature_dim = 0;
+    int hidden_dim = 0;
+
+    teegnn::ScaledPermutation p1;
+    teegnn::ScaledPermutation p2;
+    teegnn::ScaledPermutation p3;
+    teegnn::ScaledPermutation p4;
+    teegnn::ScaledPermutation p5;
+    teegnn::ScaledPermutation p6;
+
+    std::vector<teegnn::LowRankMask> lr_masks;
+
+    std::vector<teegnn::SDIMMask> sdim_masks;
+};
+
+struct MaskedData {
+    teegnn::ProtectedGraphShares graph_shares;
+    MaskedTensorShares input_features;
+    std::vector<teegnn::Matrix> masked_weights;
+};
+
+struct MaskPhaseResult {
+    MaskMatrices matrices;
+    MaskedData data;
+};
+
+struct InferencePhaseResult {
+    teegnn::Matrix logits;
+    double layer1_restore_error = 0.0;
+    double layer1_dense_error = 0.0;
+    double layer2_restore_error = 0.0;
 };
 
 class ScopedTimer {
@@ -36,58 +79,24 @@ private:
     std::chrono::steady_clock::time_point start_;
 };
 
-class REESimulator {
-public:
-    teegnn::Matrix masked_sparse_dense(int rows,
-                                       const std::vector<teegnn::WeightedEdge>& edges,
-                                       const teegnn::Matrix& x) const {
-        return teegnn::sparse_dense_mul_edges(rows, edges, x);
+teegnn::Matrix ree_masked_sparse_dense(
+    int rows,
+    const std::vector<std::vector<std::pair<int, double>>>& adjacency,
+    const teegnn::Matrix& x) {
+    if (static_cast<int>(adjacency.size()) != rows) {
+        throw std::runtime_error("masked adjacency row count does not match expected rows");
     }
-
-    teegnn::Matrix masked_dense(const teegnn::Matrix& x, const teegnn::Matrix& w) const {
-        return x * w;
+    teegnn::Matrix output = teegnn::Matrix::Zero(rows, x.cols());
+    for (int row = 0; row < rows; ++row) {
+        for (const auto& [col, value] : adjacency[static_cast<std::size_t>(row)]) {
+            if (col < 0 || col >= x.rows()) {
+                throw std::runtime_error("masked adjacency column out of range");
+            }
+            output.row(row).noalias() += value * x.row(col);
+        }
     }
-};
-
-class TEESimulator {
-public:
-    teegnn::Matrix restore_aggregation(const teegnn::Matrix& y1,
-                                       const teegnn::Matrix& y2,
-                                       const teegnn::LowRankMask& mask,
-                                       const teegnn::Graph& graph,
-                                       const teegnn::ScaledPermutation& p1,
-                                       const teegnn::ScaledPermutation& p3,
-                                       const teegnn::ScaledPermutation& p4,
-                                       const teegnn::ScaledPermutation& p6) const {
-        teegnn::Matrix restored = p1.apply_left_inv(y1);
-        restored = p3.apply_right(restored);
-        teegnn::Matrix second = p4.apply_left_inv(y2);
-        second = p6.apply_right(second);
-        restored.noalias() += second;
-        restored.noalias() -= mask.ahat_times_mask(graph);
-        return restored;
-    }
-
-    teegnn::Matrix masked_dense_protocol(const teegnn::Matrix& x,
-                                         const teegnn::Matrix& w,
-                                         teegnn::RandomEngine& rng,
-                                         const REESimulator& ree) const {
-        teegnn::SDIMMask s_left = teegnn::SDIMMask::random(static_cast<int>(w.rows()), rng);
-        teegnn::SDIMMask s_right = teegnn::SDIMMask::random(static_cast<int>(w.cols()), rng);
-        teegnn::SDIMMask s_tmp = teegnn::SDIMMask::random(static_cast<int>(x.rows()), rng);
-
-        teegnn::Matrix w_masked = s_left.apply_left(w);
-        w_masked = s_right.apply_right_inv(w_masked);
-
-        teegnn::Matrix x_masked = s_tmp.apply_left(x);
-        x_masked = s_left.apply_right_inv(x_masked);
-
-        teegnn::Matrix z_masked = ree.masked_dense(x_masked, w_masked);
-        teegnn::Matrix z = s_tmp.apply_left_inv(z_masked);
-        z = s_right.apply_right(z);
-        return z;
-    }
-};
+    return output;
+}
 
 void print_usage(const char* argv0) {
     std::cerr << "Usage: " << argv0
@@ -133,6 +142,193 @@ teegnn::Matrix remask_for_ree(const teegnn::Matrix& x,
     return masked;
 }
 
+MaskedTensorShares make_masked_tensor_shares(const teegnn::Matrix& x,
+                                             const teegnn::LowRankMask& low_rank_mask,
+                                             const teegnn::ScaledPermutation& left1,
+                                             const teegnn::ScaledPermutation& right1,
+                                             const teegnn::ScaledPermutation& left2,
+                                             const teegnn::ScaledPermutation& right2) {
+    return {remask_for_ree(x, low_rank_mask, left1, right1),
+            remask_for_ree(x, low_rank_mask, left2, right2)};
+}
+
+class secure_computation {
+public:
+    secure_computation(const teegnn::Graph& graph,
+                       MaskMatrices&& masks,
+                       teegnn::RandomEngine& rng)
+        : graph_(graph), masks_(std::move(masks)), rng_(rng) {}
+
+    teegnn::Matrix restore_aggregation(const teegnn::Matrix& y1,
+                                       const teegnn::Matrix& y2,
+                                       int layer) {
+        teegnn::Matrix restored = teegnn::apply_SPM_inv(masks_.p1, masks_.p3, y1);
+        teegnn::Matrix second = teegnn::apply_SPM_inv(masks_.p4, masks_.p6, y2);
+        restored.noalias() += second;
+        restored.noalias() -= masks_.lr_masks[layer].ahat_times_mask(graph_);
+
+        temp = std::move(teegnn::SDIMMask::random(restored.rows(), rng_));
+        return teegnn::apply_SDIM(temp, masks_.sdim_masks[layer * 2], restored);
+    }
+
+    MaskedTensorShares nonlinear_layer(const teegnn::Matrix& linear_output, int layer) {
+        teegnn::Matrix z = teegnn::apply_SDIM_inv(temp, masks_.sdim_masks[layer * 2 + 1], linear_output);
+        if (layer == 0) {
+            z = teegnn::relu(z);
+            masks_.p3 = teegnn::ScaledPermutation::random(z.cols(), rng_);
+            masks_.p6 = teegnn::ScaledPermutation::random(z.cols(), rng_);
+            return make_masked_tensor_shares(
+                z, masks_.lr_masks[1], masks_.p2, masks_.p3,
+                masks_.p5, masks_.p6);      
+        } else {
+            return {z, z};  // identity for the second layer
+        }
+    }
+
+private:
+    const teegnn::Graph& graph_;
+    MaskMatrices masks_;
+    teegnn::SDIMMask temp;
+    teegnn::RandomEngine& rng_;
+};
+
+MaskPhaseResult run_mask_phase(const teegnn::Dataset& dataset,
+                               const Options& options,
+                               teegnn::RandomEngine& rng,
+                               std::vector<teegnn::TimerRecord>& timings) {
+    ScopedTimer timer(timings, "teegnn_mask_phase");
+
+    MaskPhaseResult result;
+    MaskMatrices& matrices = result.matrices;
+    MaskedData& masked_data = result.data;
+
+    matrices.node_count = dataset.graph.num_nodes();
+    matrices.feature_dim = static_cast<int>(dataset.features.cols());
+    matrices.hidden_dim = static_cast<int>(dataset.w1.cols());
+    const int class_dim = static_cast<int>(dataset.w2.cols());
+
+    matrices.p1 = teegnn::ScaledPermutation::random(matrices.node_count, rng);
+    matrices.p2 = teegnn::ScaledPermutation::random(matrices.node_count, rng);
+    matrices.p4 = teegnn::ScaledPermutation::random(matrices.node_count, rng);
+    matrices.p5 = teegnn::ScaledPermutation::random(matrices.node_count, rng);
+    masked_data.graph_shares =
+        teegnn::protect_graph_edges(dataset.graph, options.confusion_rate, matrices.p1, matrices.p2,
+                                    matrices.p4, matrices.p5, rng);
+
+    matrices.p3 = teegnn::ScaledPermutation::random(matrices.feature_dim, rng);
+    matrices.p6 = teegnn::ScaledPermutation::random(matrices.feature_dim, rng);
+    matrices.lr_masks.emplace_back(
+        teegnn::make_low_rank_mask(matrices.node_count, 
+                                   matrices.feature_dim, 
+                                   options.mask_rank, rng));
+    masked_data.input_features = make_masked_tensor_shares(
+        dataset.features, matrices.lr_masks[0], matrices.p2, matrices.p3,
+        matrices.p5, matrices.p6);
+
+    matrices.lr_masks.emplace_back(
+        teegnn::make_low_rank_mask(matrices.node_count, 
+                                   matrices.hidden_dim, 
+                                   options.mask_rank, rng));
+    {
+        teegnn::SDIMMask s_left = teegnn::SDIMMask::random(matrices.feature_dim, rng);
+        teegnn::SDIMMask s_right = teegnn::SDIMMask::random(matrices.hidden_dim, rng);
+        masked_data.masked_weights.push_back(teegnn::apply_SDIM(s_left, s_right, dataset.w1));
+        matrices.sdim_masks.push_back(std::move(s_left));
+        matrices.sdim_masks.push_back(std::move(s_right));
+    }
+    {
+        teegnn::SDIMMask s_left = teegnn::SDIMMask::random(matrices.hidden_dim, rng);
+        teegnn::SDIMMask s_right = teegnn::SDIMMask::random(class_dim, rng);
+        masked_data.masked_weights.push_back(teegnn::apply_SDIM(s_left, s_right, dataset.w2));
+        matrices.sdim_masks.push_back(std::move(s_left));
+        matrices.sdim_masks.push_back(std::move(s_right));
+    }
+
+    return result;
+}
+
+InferencePhaseResult run_inference_phase(const teegnn::Dataset& dataset,
+                                         MaskedData& masked_data,
+                                         secure_computation& secure,
+                                         std::vector<teegnn::TimerRecord>& timings) {
+    ScopedTimer timer(timings, "teegnn_inference_phase");
+
+    InferencePhaseResult result;
+    
+    teegnn::Matrix output;
+    for (int layer = 0; layer < 2; ++layer) {
+        teegnn::Matrix y1 = ree_masked_sparse_dense(dataset.graph.num_nodes(), 
+            masked_data.graph_shares.a1, masked_data.input_features.share1);
+        teegnn::Matrix y2 = ree_masked_sparse_dense(dataset.graph.num_nodes(), 
+            masked_data.graph_shares.a2, masked_data.input_features.share2);
+        
+        teegnn::Matrix masked_xbar = secure.restore_aggregation(y1, y2, layer);
+
+        masked_data.input_features = secure.nonlinear_layer(masked_xbar * masked_data.masked_weights[layer], layer);
+    }
+    result.logits = masked_data.input_features.share1; 
+
+    /*
+    teegnn::Matrix y1;
+    teegnn::Matrix y2;
+    {
+        ScopedTimer stage(timings, "teegnn_layer1_masked_aggregation_ree");
+        y1 = ree_masked_sparse_dense(
+            matrices.node_count, masked_data.graph_shares.a1, masked_data.input_features.share1);
+        y2 = ree_masked_sparse_dense(
+            matrices.node_count, masked_data.graph_shares.a2, masked_data.input_features.share2);
+    }
+
+    teegnn::Matrix xbar1;
+    {
+        ScopedTimer stage(timings, "teegnn_layer1_restore_tee");
+        xbar1 = secure.restore_input_aggregation(y1, y2);
+    }
+    result.layer1_restore_error =
+        (xbar1 - teegnn::sparse_dense_mul(dataset.graph, dataset.features)).cwiseAbs().maxCoeff();
+
+    teegnn::Matrix hidden_linear;
+    {
+        ScopedTimer stage(timings, "teegnn_layer1_masked_dense");
+        hidden_linear = secure.masked_dense_protocol(xbar1, dataset.w1);
+    }
+    result.layer1_dense_error = (hidden_linear - xbar1 * dataset.w1).cwiseAbs().maxCoeff();
+
+    teegnn::Matrix hidden;
+    {
+        ScopedTimer stage(timings, "teegnn_relu_tee");
+        hidden = secure.relu(hidden_linear);
+    }
+
+    const MaskedTensorShares hidden_shares = make_masked_tensor_shares(
+        hidden, matrices.hidden_mask, matrices.p2, matrices.p3_hidden,
+        matrices.p5, matrices.p6_hidden);
+
+    {
+        ScopedTimer stage(timings, "teegnn_layer2_masked_aggregation_ree");
+        y1 = ree_masked_sparse_dense(
+            matrices.node_count, masked_data.graph_shares.a1, hidden_shares.share1);
+        y2 = ree_masked_sparse_dense(
+            matrices.node_count, masked_data.graph_shares.a2, hidden_shares.share2);
+    }
+
+    teegnn::Matrix xbar2;
+    {
+        ScopedTimer stage(timings, "teegnn_layer2_restore_tee");
+        xbar2 = secure.restore_hidden_aggregation(y1, y2);
+    }
+    result.layer2_restore_error =
+        (xbar2 - teegnn::sparse_dense_mul(dataset.graph, hidden)).cwiseAbs().maxCoeff();
+
+    {
+        ScopedTimer stage(timings, "teegnn_layer2_masked_dense");
+        result.logits = secure.masked_dense_protocol(xbar2, dataset.w2);
+    }
+    */
+
+    return result;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -154,105 +350,23 @@ int main(int argc, char** argv) {
         }
 
         teegnn::RandomEngine rng(options.seed, 0, "teegnn-sim");
-        REESimulator ree;
-        TEESimulator tee;
 
-        teegnn::Matrix logits;
-        std::size_t confusion_edges = 0;
-        double layer1_restore_error = 0.0;
-        double layer1_dense_error = 0.0;
-        double layer2_restore_error = 0.0;
-        {
-            ScopedTimer timer(timings, "teegnn_mask_generation");
-            const int n = dataset.graph.num_nodes();
-            const int feature_dim = static_cast<int>(dataset.features.cols());
-            const int hidden_dim = static_cast<int>(dataset.w1.cols());
-
-            teegnn::ScaledPermutation p1 = teegnn::ScaledPermutation::random(n, rng);
-            teegnn::ScaledPermutation p2 = teegnn::ScaledPermutation::random(n, rng);
-            teegnn::ScaledPermutation p4 = teegnn::ScaledPermutation::random(n, rng);
-            teegnn::ScaledPermutation p5 = teegnn::ScaledPermutation::random(n, rng);
-            teegnn::ProtectedGraphShares graph_shares =
-                teegnn::protect_graph_edges(dataset.graph, options.confusion_rate, p1, p2, p4, p5, rng);
-            confusion_edges = graph_shares.confusion_edges;
-
-            teegnn::ScaledPermutation p3_0 = teegnn::ScaledPermutation::random(feature_dim, rng);
-            teegnn::ScaledPermutation p6_0 = teegnn::ScaledPermutation::random(feature_dim, rng);
-            teegnn::LowRankMask m0 =
-                teegnn::make_low_rank_mask(n, feature_dim, options.mask_rank, rng);
-
-            teegnn::Matrix h1 = remask_for_ree(dataset.features, m0, p2, p3_0);
-            teegnn::Matrix h2 = remask_for_ree(dataset.features, m0, p5, p6_0);
-
-            teegnn::Matrix y1;
-            teegnn::Matrix y2;
-            {
-                ScopedTimer stage(timings, "teegnn_layer1_masked_aggregation_ree");
-                y1 = ree.masked_sparse_dense(n, graph_shares.a1, h1);
-                y2 = ree.masked_sparse_dense(n, graph_shares.a2, h2);
-            }
-
-            teegnn::Matrix xbar1;
-            {
-                ScopedTimer stage(timings, "teegnn_layer1_restore_tee");
-                xbar1 = tee.restore_aggregation(y1, y2, m0, dataset.graph, p1, p3_0, p4, p6_0);
-            }
-            layer1_restore_error = (xbar1 - teegnn::sparse_dense_mul(dataset.graph, dataset.features))
-                                       .cwiseAbs()
-                                       .maxCoeff();
-
-            teegnn::Matrix hidden_linear;
-            {
-                ScopedTimer stage(timings, "teegnn_layer1_masked_dense");
-                hidden_linear = tee.masked_dense_protocol(xbar1, dataset.w1, rng, ree);
-            }
-            layer1_dense_error = (hidden_linear - xbar1 * dataset.w1).cwiseAbs().maxCoeff();
-
-            teegnn::Matrix hidden;
-            {
-                ScopedTimer stage(timings, "teegnn_relu_tee");
-                hidden = teegnn::relu(hidden_linear);
-            }
-
-            teegnn::ScaledPermutation p3_1 = teegnn::ScaledPermutation::random(hidden_dim, rng);
-            teegnn::ScaledPermutation p6_1 = teegnn::ScaledPermutation::random(hidden_dim, rng);
-            teegnn::LowRankMask m1 =
-                teegnn::make_low_rank_mask(n, hidden_dim, options.mask_rank, rng);
-            h1 = remask_for_ree(hidden, m1, p2, p3_1);
-            h2 = remask_for_ree(hidden, m1, p5, p6_1);
-
-            {
-                ScopedTimer stage(timings, "teegnn_layer2_masked_aggregation_ree");
-                y1 = ree.masked_sparse_dense(n, graph_shares.a1, h1);
-                y2 = ree.masked_sparse_dense(n, graph_shares.a2, h2);
-            }
-
-            teegnn::Matrix xbar2;
-            {
-                ScopedTimer stage(timings, "teegnn_layer2_restore_tee");
-                xbar2 = tee.restore_aggregation(y1, y2, m1, dataset.graph, p1, p3_1, p4, p6_1);
-            }
-            layer2_restore_error = (xbar2 - teegnn::sparse_dense_mul(dataset.graph, hidden))
-                                       .cwiseAbs()
-                                       .maxCoeff();
-
-            {
-                ScopedTimer stage(timings, "teegnn_layer2_masked_dense");
-                logits = tee.masked_dense_protocol(xbar2, dataset.w2, rng, ree);
-            }
-        }
+        MaskPhaseResult masks = run_mask_phase(dataset, options, rng, timings);
+        secure_computation secure(dataset.graph, std::move(masks.matrices), rng);
+        const InferencePhaseResult inference =
+            run_inference_phase(dataset, masks.data, secure, timings);
 
         teegnn::IntVector predictions;
         double teegnn_accuracy = 0.0;
         {
             ScopedTimer timer(timings, "teegnn_argmax_accuracy");
-            predictions = teegnn::argmax_rows(logits);
+            predictions = teegnn::argmax_rows(inference.logits);
             teegnn_accuracy = teegnn::accuracy(predictions, dataset.labels);
         }
 
-        const teegnn::Matrix abs_error = (logits - plaintext.logits).cwiseAbs();
-        const double max_abs_error = abs_error.maxCoeff();
-        const double mean_abs_error = abs_error.sum() / static_cast<double>(abs_error.size());
+        // const teegnn::Matrix abs_error = (inference.logits - plaintext.logits).cwiseAbs();
+        // const double max_abs_error = abs_error.maxCoeff();
+        // const double mean_abs_error = abs_error.sum() / static_cast<double>(abs_error.size());
 
         std::vector<int> mismatches;
         for (std::size_t i = 0; i < predictions.size(); ++i) {
@@ -271,17 +385,18 @@ int main(int argc, char** argv) {
         std::cout << "nodes: " << dataset.graph.num_nodes() << "\n";
         std::cout << "directed_edges_without_self: " << dataset.graph.raw_directed_edges() << "\n";
         std::cout << "normalized_support_edges: " << dataset.graph.edges().size() << "\n";
-        std::cout << "confusion_edges: " << confusion_edges << "\n";
+        std::cout << "confusion_edges: " << masks.data.graph_shares.confusion_edges << "\n";
         std::cout << "feature_dim: " << dataset.features.cols() << "\n";
         std::cout << "hidden_dim: " << dataset.w1.cols() << "\n";
         std::cout << "class_count: " << dataset.w2.cols() << "\n";
         std::cout << "plaintext_accuracy: " << plaintext.accuracy << "\n";
         std::cout << "teegnn_sim_accuracy: " << teegnn_accuracy << "\n";
-        std::cout << "logits_max_abs_error: " << max_abs_error << "\n";
-        std::cout << "logits_mean_abs_error: " << mean_abs_error << "\n";
-        std::cout << "debug_layer1_restore_max_abs_error: " << layer1_restore_error << "\n";
-        std::cout << "debug_layer1_dense_max_abs_error: " << layer1_dense_error << "\n";
-        std::cout << "debug_layer2_restore_max_abs_error: " << layer2_restore_error << "\n";
+        // std::cout << "logits_max_abs_error: " << max_abs_error << "\n";
+        // std::cout << "logits_mean_abs_error: " << mean_abs_error << "\n";
+        // std::cout << "debug_layer1_restore_max_abs_error: " << inference.layer1_restore_error << "\n";
+        // std::cout << "debug_layer1_dense_max_abs_error: " << inference.layer1_dense_error << "\n";
+        // std::cout << "debug_layer2_restore_max_abs_error: " << inference.layer2_restore_error << "\n";
+        
         if (mismatches.empty()) {
             std::cout << "comparison: PASS\n";
         } else {
@@ -293,10 +408,12 @@ int main(int argc, char** argv) {
             }
             std::cout << "\n";
         }
+        
         for (const auto& record : timings) {
             std::cout << "timing_ms." << record.name << ": " << record.milliseconds << "\n";
         }
         std::cout << "timing_ms.total: " << total_ms << "\n";
+
     } catch (const std::exception& ex) {
         std::cerr << "teegnn_sim: " << ex.what() << "\n";
         return 1;

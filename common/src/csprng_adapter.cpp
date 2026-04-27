@@ -1,6 +1,8 @@
 #include "csprng_adapter.hpp"
 
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 namespace teegnn {
 
@@ -20,6 +22,35 @@ double RandomEngine::uniform(double a, double b) {
     return out;
 }
 
+std::int64_t RandomEngine::uniform_int(std::int64_t min_inclusive, std::int64_t max_exclusive) {
+    if (min_inclusive >= max_exclusive) {
+        throw std::runtime_error("uniform_int called with an empty range");
+    }
+    std::uint64_t span = 0;
+    if (min_inclusive < 0 && max_exclusive > 0) {
+        const std::uint64_t negative_count =
+            static_cast<std::uint64_t>(-(min_inclusive + 1)) + 1U;
+        span = negative_count + static_cast<std::uint64_t>(max_exclusive);
+        if (span == 0) {
+            throw std::runtime_error("uniform_int range is too large");
+        }
+    } else {
+        span = static_cast<std::uint64_t>(max_exclusive - min_inclusive);
+    }
+
+    std::uint64_t offset = 0;
+    check(csprng_u64_range(&stream_, 0, span, &offset), "csprng_u64_range");
+    if (min_inclusive < 0 && max_exclusive > 0) {
+        const std::uint64_t negative_count =
+            static_cast<std::uint64_t>(-(min_inclusive + 1)) + 1U;
+        if (offset < negative_count) {
+            return min_inclusive + static_cast<std::int64_t>(offset);
+        }
+        return static_cast<std::int64_t>(offset - negative_count);
+    }
+    return min_inclusive + static_cast<std::int64_t>(offset);
+}
+
 std::uint64_t RandomEngine::uniform_index(std::uint64_t n) {
     if (n == 0) {
         throw std::runtime_error("uniform_index called with zero range");
@@ -29,19 +60,23 @@ std::uint64_t RandomEngine::uniform_index(std::uint64_t n) {
     return out;
 }
 
-double RandomEngine::nonzero_scale() {
-    double value = 0.0;
-    do {
-        value = uniform(-2.0, 2.0);
-    } while (value > -0.05 && value < 0.05);
-    return value;
+double RandomEngine::random_matrix_value() {
+    return static_cast<double>(uniform_int(kMatrixRandomMin, kMatrixRandomMax));
 }
 
-Matrix RandomEngine::normal_like(int rows, int cols, double amplitude) {
+double RandomEngine::nonzero_scale() {
+    std::int64_t value = 0;
+    do {
+        value = uniform_int(kMatrixRandomMin, kMatrixRandomMax);
+    } while (value == 0);
+    return static_cast<double>(value);
+}
+
+Matrix RandomEngine::random_matrix(int rows, int cols) {
     Matrix out(rows, cols);
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
-            out(i, j) = uniform(-amplitude, amplitude);
+            out(i, j) = static_cast<double>(uniform_int(-256, 255));
         }
     }
     return out;
@@ -54,4 +89,3 @@ void RandomEngine::check(int status, const char* what) {
 }
 
 }  // namespace teegnn
-

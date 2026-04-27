@@ -1,0 +1,228 @@
+// tee_gcn_client.cpp
+#include "tee_gnn_client.h"
+#include <iostream>
+#include <cstring>
+#include <stdexcept>
+
+// TA UUID
+static const TEEC_UUID ta_uuid = TEEGNN_TA_UUID;
+
+TEEGNNClient::TEEGNNClient() : initialized_(false) {
+    memset(&context_, 0, sizeof(context_));
+    memset(&session_, 0, sizeof(session_));
+}
+
+TEEGNNClient::~TEEGNNClient() {
+    cleanup();
+}
+
+bool TEEGNNClient::initialize() {
+    TEEC_Result result = TEEC_InitializeContext(NULL, &context_);
+    if (!checkResult(result, "InitializeContext")) {
+        return false;
+    }
+    
+    result = TEEC_OpenSession(&context_, &session_, &ta_uuid,
+                              TEEC_LOGIN_PUBLIC, NULL, NULL, NULL);
+    if (!checkResult(result, "OpenSession")) {
+        TEEC_FinalizeContext(&context_);
+        return false;
+    }
+    
+    initialized_ = true;
+    std::cout << "TEE GNN Client initialized successfully" << std::endl;
+    return true;
+}
+
+bool TEEGNNClient::init_GNNContext(
+    int num_vertices, int rank, 
+    const std::vector<uint32_t>& lmm_u) {
+    
+    if (!initialized_) {
+        std::cerr << "TEE client not initialized" << std::endl;
+        return false;
+    }
+
+    // 设置操作
+    TEEC_Operation op;
+    memset(&op, 0, sizeof(op));
+    op.paramTypes = TEEC_PARAM_TYPES(
+        TEEC_MEMREF_TEMP_INPUT,   // low_rank_mask precompute
+        TEEC_VALUE_INPUT,         // num_vertices, rank
+        TEEC_NONE,
+        TEEC_NONE
+    );
+    
+    op.params[0].tmpref.buffer = (void*)lmm_u.data();
+    op.params[0].tmpref.size = lmm_u.size();
+    
+    op.params[1].value.a = num_vertices;
+    op.params[1].value.b = rank;
+    
+    // 调用TA
+    TEEC_Result result = TEEC_InvokeCommand(
+        &session_, TA_CMD_INIT_CONTEXT, &op, NULL);
+    
+    return checkResult(result, "InitGNNContext");
+}
+
+bool TEEGNNClient::restore_aggregation(uint32_t layer_idx, Matrix& y1, Matrix& y2) {
+    if (!initialized_) {
+        std::cerr << "TEE client not initialized" << std::endl;
+        return false;
+    }
+    
+    // 验证矩阵尺寸
+    if (y1.rows() != y2.rows() ||
+        y1.cols() != y2.cols()) {
+        std::cerr << "Input matrices have different dimensions" << std::endl;
+        return false;
+    }
+    
+    uint32_t rows = y1.rows();
+    uint32_t cols = y1.cols();
+
+    // Matrix debug_info(rows, cols);
+    
+    // 设置操作
+    TEEC_Operation op;
+    memset(&op, 0, sizeof(op));
+    op.paramTypes = TEEC_PARAM_TYPES(
+        TEEC_MEMREF_TEMP_INOUT,   // 加密输入输出1
+        TEEC_MEMREF_TEMP_INPUT,   // 加密输入输出2
+        TEEC_VALUE_INPUT,  // 
+        TEEC_NONE
+    );
+    
+    op.params[0].tmpref.buffer = (void*)y1.data();
+    op.params[0].tmpref.size = rows * cols * sizeof(double);
+    
+    op.params[1].tmpref.buffer = (void*)y2.data();
+    op.params[1].tmpref.size = rows * cols * sizeof(double);
+
+    op.params[2].value.a = layer_idx;  // layer_idx
+    op.params[2].value.b = cols;       // feature_dim
+    
+    // 调用TA
+    TEEC_Result result = TEEC_InvokeCommand(
+        &session_, TA_CMD_RESTORE, &op, NULL);
+    
+    return checkResult(result, "ComputeNonlinearLayer");
+}
+
+bool TEEGNNClient::nonlinear_layer(
+    uint32_t layer_idx,
+    Matrix& linear_output,
+    Matrix& h_share,
+    const std::string& activation) {
+    
+    if (!initialized_) {
+        std::cerr << "TEE client not initialized" << std::endl;
+        return false;
+    }
+    
+    // 验证矩阵尺寸
+    if (linear_output.rows() != h_share.rows() ||
+        linear_output.cols() != h_share.cols()) {
+        std::cerr << "Input matrices have different dimensions" << std::endl;
+        return false;
+    }
+    
+    uint32_t rows = linear_output.rows();
+    uint32_t cols = linear_output.cols();
+
+    Matrix debug_info(rows, cols);
+    
+    // 设置操作
+    TEEC_Operation op;
+    memset(&op, 0, sizeof(op));
+    op.paramTypes = TEEC_PARAM_TYPES(
+        TEEC_MEMREF_TEMP_INOUT,   // masked H1_0
+        TEEC_MEMREF_TEMP_OUT,   // masked H1_1
+        TEEC_VALUE_INPUT,  // layer_idx and activation
+        TEEC_NONE
+    );
+    
+    // 编码额外信息到memref.size
+    uint32_t activation_code = (activation == "ReLU") ? 0 : 1;
+    uint32_t encoded_size = (layer_idx << 16) | activation_code;
+    
+    op.params[0].tmpref.buffer = (void*)linear_output.data();
+    op.params[0].tmpref.size = rows * cols * sizeof(double);
+    
+    op.params[1].tmpref.buffer = (void*)h_share.data();
+    op.params[1].tmpref.size = rows * cols * sizeof(double);
+    
+    op.params[2].value.a = encoded_size;  // 高16位: layer_idx, 低16位: activation
+    op.params[2].value.b = linear_output.cols();  // 特征维度
+    
+    // 调用TA
+    TEEC_Result result = TEEC_InvokeCommand(
+        &session_, TA_CMD_NONLINEAR_LAYER, &op, NULL);
+    
+    return checkResult(result, "ComputeNonlinearLayer");
+}
+
+void TEEGNNClient::cleanup() {
+    if (initialized_) {
+        // 清理TA上下文
+        TEEC_Operation op;
+        memset(&op, 0, sizeof(op));
+        TEEC_InvokeCommand(&session_, TA_CMD_CLEANUP_CONTEXT, &op, NULL);
+        
+        // 关闭会话
+        TEEC_CloseSession(&session_);
+        TEEC_FinalizeContext(&context_);
+        
+        initialized_ = false;
+        std::cout << "TEE GNN Client cleaned up" << std::endl;
+    }
+}
+
+bool TEEGNNClient::checkResult(TEEC_Result result, const std::string& operation) {
+    if (result != TEEC_SUCCESS) {
+        std::cerr << operation << " failed: 0x" << std::hex << result << std::dec;
+        switch (result) {
+            case TEEC_ERROR_GENERIC:
+                std::cerr << " (Generic error)" << std::endl; break;
+            case TEEC_ERROR_ACCESS_DENIED:
+                std::cerr << " (Access denied)" << std::endl; break;
+            case TEEC_ERROR_CANCEL:
+                std::cerr << " (Operation cancelled)" << std::endl; break;
+            case TEEC_ERROR_ACCESS_CONFLICT:
+                std::cerr << " (Access conflict)" << std::endl; break;
+            case TEEC_ERROR_EXCESS_DATA:
+                std::cerr << " (Excess data)" << std::endl; break;
+            case TEEC_ERROR_BAD_FORMAT:
+                std::cerr << " (Bad format)" << std::endl; break;
+            case TEEC_ERROR_BAD_PARAMETERS:
+                std::cerr << " (Bad parameters)" << std::endl; break;
+            case TEEC_ERROR_BAD_STATE:
+                std::cerr << " (Bad state)" << std::endl; break;
+            case TEEC_ERROR_ITEM_NOT_FOUND:
+                std::cerr << " (Item not found)" << std::endl; break;
+            case TEEC_ERROR_NOT_IMPLEMENTED:
+                std::cerr << " (Not implemented)" << std::endl; break;
+            case TEEC_ERROR_NOT_SUPPORTED:
+                std::cerr << " (Not supported)" << std::endl; break;
+            case TEEC_ERROR_NO_DATA:
+                std::cerr << " (No data)" << std::endl; break;
+            case TEEC_ERROR_OUT_OF_MEMORY:
+                std::cerr << " (Out of memory)" << std::endl; break;
+            case TEEC_ERROR_BUSY:
+                std::cerr << " (Busy)" << std::endl; break;
+            case TEEC_ERROR_COMMUNICATION:
+                std::cerr << " (Communication error)" << std::endl; break;
+            case TEEC_ERROR_SECURITY:
+                std::cerr << " (Security error)" << std::endl; break;
+            case TEEC_ERROR_SHORT_BUFFER:
+                std::cerr << " (Short buffer)" << std::endl; break;
+            case TEEC_ERROR_EXTERNAL_CANCEL:
+                std::cerr << " (External cancel)" << std::endl; break;
+            default:
+                std::cerr << " (Unknown error)" << std::endl; break;
+        }
+        return false;
+    }
+    return true;
+}

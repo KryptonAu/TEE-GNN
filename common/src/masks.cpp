@@ -4,6 +4,7 @@
 #include <cmath>
 #include <stdexcept>
 #include <unordered_set>
+#include <iostream>
 
 namespace teegnn {
 namespace {
@@ -38,6 +39,18 @@ ScaledPermutation::ScaledPermutation(std::vector<int> permutation, std::vector<d
         seen[static_cast<std::size_t>(mapped)] = 1;
         inverse_permutation_[static_cast<std::size_t>(mapped)] = i;
     }
+}
+
+ScaledPermutation::ScaledPermutation(ScaledPermutation&& other)
+    : permutation_(std::move(other.permutation_)),
+      inverse_permutation_(std::move(other.inverse_permutation_)),
+      scale_(std::move(other.scale_)) {}
+
+ScaledPermutation& ScaledPermutation::operator=(ScaledPermutation&& other) {
+    permutation_ = std::move(other.permutation_);
+    inverse_permutation_ = std::move(other.inverse_permutation_);
+    scale_ = std::move(other.scale_);
+    return *this;
 }
 
 ScaledPermutation ScaledPermutation::random(int dim, RandomEngine& rng) {
@@ -93,6 +106,34 @@ Matrix ScaledPermutation::apply_right_inv(const Matrix& x) const {
     return out;
 }
 
+Matrix apply_SPM(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x) {
+    int r = L.dim();
+    int c = R.dim();
+    Matrix out(x.rows(), x.cols());
+    for (int j = 0; j < c; ++j) {
+        int n_j = R.permutation()[j];
+        for (int i = 0; i < r; ++i) {
+            int n_i = L.permutation()[i];
+            out(i, j) = x(n_i, n_j) / R.scale()[j] * L.scale()[i];
+        }
+    }
+    return out;
+}
+
+Matrix apply_SPM_inv(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x) {
+    int r = L.dim();
+    int c = R.dim();
+    Matrix out(x.rows(), x.cols());
+    for (int j = 0; j < c; ++j) {
+        int n_j = R.permutation()[j];
+        for (int i = 0; i < r; ++i) {
+            int n_i = L.permutation()[i];
+            out(n_i, n_j) = x(i, j) / L.scale()[i] * R.scale()[j];
+        }
+    }
+    return out;
+}
+
 Matrix LowRankMask::materialize() const {
     return u * v.transpose();
 }
@@ -101,83 +142,120 @@ Matrix LowRankMask::ahat_times_mask(const Graph& graph) const {
     return sparse_dense_mul(graph, u) * v.transpose();
 }
 
-LowRankMask make_low_rank_mask(int rows, int cols, int rank, RandomEngine& rng, double amplitude) {
+LowRankMask make_low_rank_mask(int rows, int cols, int rank, RandomEngine& rng) {
     if (rank <= 0) {
         return {Matrix::Zero(rows, 0), Matrix::Zero(cols, 0)};
     }
-    return {rng.normal_like(rows, rank, amplitude), rng.normal_like(cols, rank, amplitude)};
+    return {rng.random_matrix(rows, rank), rng.random_matrix(cols, rank)};
 }
 
-SDIMMask::SDIMMask(ScaledPermutation p, Vector u, Vector v)
-    : p_(std::move(p)), u_(std::move(u)), v_(std::move(v)) {
-    if (u_.size() != p_.dim() || v_.size() != p_.dim()) {
+SDIMMask::SDIMMask(ScaledPermutation p, Vector h)
+    : p_(std::move(p)), h_(std::move(h)) {
+    if (h_.size() != p_.dim()) {
         throw std::runtime_error("SDIM vector dimension mismatch");
     }
-    Matrix u_mat(u_.rows(), 1);
-    u_mat.col(0) = u_;
-    const Matrix pinv_u = p_.apply_left_inv(u_mat);
-    denominator_ = 1.0 + v_.dot(pinv_u.col(0));
+    denominator_ = 1.0;
+    for (int i = 0; i < p_.dim(); ++i) {
+        denominator_ +=  h_(i) / p_.scale()[static_cast<std::size_t>(i)];
+    }
     if (std::abs(denominator_) < 1e-8) {
         throw std::runtime_error("singular SDIM mask");
     }
 }
 
+SDIMMask::SDIMMask(SDIMMask&& other) {
+    p_ = std::move(other.p_);
+    h_ = std::move(other.h_);
+    denominator_ = other.denominator_;
+}
+
+SDIMMask& SDIMMask::operator=(SDIMMask&& other) {
+    p_ = std::move(other.p_);
+    h_ = std::move(other.h_);
+    denominator_ = other.denominator_;
+    return *this;
+}
+
 SDIMMask SDIMMask::random(int dim, RandomEngine& rng) {
     for (int attempt = 0; attempt < 32; ++attempt) {
         ScaledPermutation p = ScaledPermutation::random(dim, rng);
-        Vector u(dim);
-        Vector v(dim);
+        Vector h(dim);
         for (int i = 0; i < dim; ++i) {
-            u(i) = rng.uniform(-0.02, 0.02);
-            v(i) = rng.uniform(-0.02, 0.02);
+            h(i) = rng.nonzero_scale();
         }
         try {
-            return SDIMMask(std::move(p), std::move(u), std::move(v));
+            return SDIMMask(std::move(p), std::move(h));
         } catch (const std::runtime_error&) {
         }
     }
     throw std::runtime_error("failed to generate non-singular SDIM mask");
 }
 
-Matrix SDIMMask::apply_left(const Matrix& x) const {
-    require_square_dim(dim(), x.rows(), "left SDIM");
-    Matrix out = p_.apply_left(x);
-    out.noalias() += u_ * (v_.transpose() * x);
+Matrix apply_SDIM(const SDIMMask& L, const SDIMMask& R, const Matrix& x) {
+    int r = L.dim();
+    int c = R.dim();
+    double sum = 0.0;
+    Vector row_sum = Vector::Zero(r);
+    Vector col_sum = Vector::Zero(c);
+    for (int j = 0; j < c; ++j) {
+        for (int i = 0; i < r; ++i) {
+            row_sum(i) += x(i, R.perm(j)) / R.value(j) * R.h(j) ;
+            col_sum(j) += x(i, j);
+        }
+    }
+    for (int i = 0; i < r; ++i) {
+        row_sum(i) /= R.denominator();
+    }
+    for (int j = 0; j < c; ++j) {
+        sum += col_sum(R.perm(j)) / R.denominator() / R.value(j) * R.h(j);
+    }
+
+    Matrix out(x.rows(), x.cols());
+    for (int j = 0; j < c; ++j) {
+        int n_j = R.perm(j);
+        for (int i = 0; i < r; ++i) {
+            int n_i = L.perm(i);
+            out(i, j) = x(n_i, n_j) / R.value(j) * L.value(i) + 
+                                 col_sum(n_j) / R.value(j) * L.h(i) -
+                                 row_sum(n_i) / R.value(j) * L.value(i) -
+                                 sum / R.value(j) * L.h(i) ;
+        }
+    }
+    // std::cout<< out.maxCoeff() <<' '<< out.minCoeff() <<'\n';
     return out;
 }
 
-Matrix SDIMMask::apply_left_inv(const Matrix& x) const {
-    require_square_dim(dim(), x.rows(), "left SDIM inverse");
-    Matrix z = p_.apply_left_inv(x);
-    Matrix u_mat(u_.rows(), 1);
-    u_mat.col(0) = u_;
-    const Matrix pinv_u = p_.apply_left_inv(u_mat);
-    const Matrix correction = pinv_u.col(0) * ((v_.transpose() * z) / denominator_);
-    z -= correction;
-    return z;
-}
+Matrix apply_SDIM_inv(const SDIMMask& L, const SDIMMask& R, const Matrix& x) {
+    int r = L.dim();
+    int c = R.dim();
+    double sum = 0.0;
+    Vector row_sum = Vector::Zero(r);
+    Vector col_sum = Vector::Zero(c);
+    for (int j = 0; j < c; ++j) {
+        for (int i = 0; i < r; ++i) {
+            row_sum(i) += x(i, j) / L.value(i) * R.h(j);
+            col_sum(j) += x(i, j) / L.value(i) * R.value(j);
+        }
+        col_sum(j) /= L.denominator();
+    }
+    for (int i = 0; i < r; ++i) {
+        sum += row_sum(i) / L.denominator();
+    }
+    // std::cout<< sum <<' '<< L.denominator() <<'\n';
 
-Matrix SDIMMask::apply_right(const Matrix& x) const {
-    require_square_dim(dim(), x.cols(), "right SDIM");
-    Matrix out = p_.apply_right(x);
-    out.noalias() += (x * u_) * v_.transpose();
+    Matrix out(x.rows(), x.cols());
+    for (int j = 0; j < c; ++j) {
+        int n_j = R.perm(j);
+        for (int i = 0; i < r; ++i) {
+            int n_i = L.perm(i);
+            out(n_i, n_j) = x(i, j) / L.value(i) * R.value(j) + 
+                                     row_sum(i) -
+                                     col_sum(j) / L.value(i) * L.h(i) -
+                                     sum / L.value(i) * L.h(i);
+        }
+    }
+    // std::cout<< out.maxCoeff() <<' '<< out.minCoeff() <<'\n';
     return out;
-}
-
-Matrix SDIMMask::apply_right_inv(const Matrix& x) const {
-    require_square_dim(dim(), x.cols(), "right SDIM inverse");
-    Matrix z = p_.apply_right_inv(x);
-    Matrix v_row(1, v_.rows());
-    v_row.row(0) = v_.transpose();
-    const Matrix vtpinv = p_.apply_right_inv(v_row);
-    const Matrix correction = (z * u_) * (vtpinv / denominator_);
-    z -= correction;
-    return z;
-}
-
-Matrix SDIMMask::materialize() const {
-    Matrix eye = Matrix::Identity(dim(), dim());
-    return apply_left(eye);
 }
 
 namespace {
@@ -235,12 +313,14 @@ ProtectedGraphShares protect_graph_edges(const Graph& graph,
 
     ProtectedGraphShares shares;
     shares.confusion_edges = confusion_edges;
-    shares.a1.reserve(augmented.size());
-    shares.a2.reserve(augmented.size());
+    shares.a1.assign(static_cast<std::size_t>(n), {});
+    shares.a2.assign(static_cast<std::size_t>(n), {});
     for (const auto& edge : augmented) {
-        const double eta = rng.uniform(-0.01, 0.01);
-        shares.a1.push_back(transform_share_edge(edge, 0.5 * edge.value + eta, p1, p2));
-        shares.a2.push_back(transform_share_edge(edge, 0.5 * edge.value - eta, p4, p5));
+        const double eta = rng.random_matrix_value();
+        const WeightedEdge a1_edge = transform_share_edge(edge, 0.5 * edge.value + eta, p1, p2);
+        const WeightedEdge a2_edge = transform_share_edge(edge, 0.5 * edge.value - eta, p4, p5);
+        shares.a1[static_cast<std::size_t>(a1_edge.row)].push_back({a1_edge.col, a1_edge.value});
+        shares.a2[static_cast<std::size_t>(a2_edge.row)].push_back({a2_edge.col, a2_edge.value});
     }
     return shares;
 }

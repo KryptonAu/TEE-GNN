@@ -115,7 +115,7 @@ InferencePhaseResult run_secure_inference(teegnn::MaskedData& masked_data,
         secure->restore_aggregation(layer, y1, y2);
 
         y1 *= masked_data.weights[layer];
-        y2.reshaped(y1.rows(), y1.cols());
+        y2 = Eigen::MatrixXd::Zero(y1.rows(), y1.cols()); // dummy for secure computation
         
         if (layer == 0) {
             secure->nonlinear_layer(layer, y1, y2, "ReLU");

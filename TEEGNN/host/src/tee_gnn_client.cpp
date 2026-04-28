@@ -44,6 +44,10 @@ bool TEEGNNClient::init_GNNContext(
         std::cerr << "TEE client not initialized" << std::endl;
         return false;
     }
+    if (num_vertices <= 0 || rank < 0 || lmm_u.size() != 2) {
+        std::cerr << "Invalid GNN context dimensions" << std::endl;
+        return false;
+    }
 
     // 设置操作
     TEEC_Operation op;
@@ -55,20 +59,25 @@ bool TEEGNNClient::init_GNNContext(
         TEEC_NONE
     );
 
-    double* lmm_u_data = nullptr;
+    std::vector<double> lmm_u_data;
     size_t lmm_u_size = 0;
     for (const auto& mat : lmm_u) {
-        lmm_u_size += mat.size();
+        if (mat.rows() != num_vertices || mat.cols() != rank) {
+            std::cerr << "Low-rank precompute matrix dimension mismatch" << std::endl;
+            return false;
+        }
+        lmm_u_size += static_cast<size_t>(mat.size());
     }
-    lmm_u_data = new double[lmm_u_size];
-    size_t offset = 0;
+    lmm_u_data.reserve(lmm_u_size);
     for (const auto& mat : lmm_u) {
-        std::memcpy(lmm_u_data + offset, mat.data(), mat.size() * sizeof(double));
-        offset += mat.size();
+        const size_t mat_size = static_cast<size_t>(mat.size());
+        if (mat_size > 0) {
+            lmm_u_data.insert(lmm_u_data.end(), mat.data(), mat.data() + mat_size);
+        }
     }
     
-    op.params[0].tmpref.buffer = (void*)lmm_u_data;
-    op.params[0].tmpref.size = lmm_u_size * sizeof(double);
+    op.params[0].tmpref.buffer = lmm_u_data.empty() ? nullptr : (void*)lmm_u_data.data();
+    op.params[0].tmpref.size = lmm_u_data.size() * sizeof(double);
     
     op.params[1].value.a = num_vertices;
     op.params[1].value.b = rank;

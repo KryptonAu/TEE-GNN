@@ -29,5 +29,6 @@ For this repository layout you can also run:
 
 ```bash
 ./build/teegnn_sim ../dataset/cora --confusion-rate 0.2 --mask-rank 2 --seed 1234
+/data/bin/teegnn_host /home/gjh/dataset/cora --confusion-rate 1 --mask-rank 2 --seed 114514
 ```
 

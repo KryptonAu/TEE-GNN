@@ -1,8 +1,10 @@
 // tee_gcn_client.cpp
-#include "tee_gnn_client.h"
+#include "tee_gnn_client.hpp"
 #include <iostream>
 #include <cstring>
 #include <stdexcept>
+
+namespace teegnn {
 
 // TA UUID
 static const TEEC_UUID ta_uuid = TEEGNN_TA_UUID;
@@ -36,7 +38,7 @@ bool TEEGNNClient::initialize() {
 
 bool TEEGNNClient::init_GNNContext(
     int num_vertices, int rank, 
-    const std::vector<uint32_t>& lmm_u) {
+    const std::vector<Matrix>& lmm_u) {
     
     if (!initialized_) {
         std::cerr << "TEE client not initialized" << std::endl;
@@ -52,16 +54,28 @@ bool TEEGNNClient::init_GNNContext(
         TEEC_NONE,
         TEEC_NONE
     );
+
+    double* lmm_u_data = nullptr;
+    size_t lmm_u_size = 0;
+    for (const auto& mat : lmm_u) {
+        lmm_u_size += mat.size();
+    }
+    lmm_u_data = new double[lmm_u_size];
+    size_t offset = 0;
+    for (const auto& mat : lmm_u) {
+        std::memcpy(lmm_u_data + offset, mat.data(), mat.size() * sizeof(double));
+        offset += mat.size();
+    }
     
-    op.params[0].tmpref.buffer = (void*)lmm_u.data();
-    op.params[0].tmpref.size = lmm_u.size();
+    op.params[0].tmpref.buffer = (void*)lmm_u_data;
+    op.params[0].tmpref.size = lmm_u_size * sizeof(double);
     
     op.params[1].value.a = num_vertices;
     op.params[1].value.b = rank;
     
     // 调用TA
     TEEC_Result result = TEEC_InvokeCommand(
-        &session_, TA_CMD_INIT_CONTEXT, &op, NULL);
+        &session_, TEEGNN_CMD_INIT_CONTEXT, &op, NULL);
     
     return checkResult(result, "InitGNNContext");
 }
@@ -88,9 +102,9 @@ bool TEEGNNClient::restore_aggregation(uint32_t layer_idx, Matrix& y1, Matrix& y
     TEEC_Operation op;
     memset(&op, 0, sizeof(op));
     op.paramTypes = TEEC_PARAM_TYPES(
-        TEEC_MEMREF_TEMP_INOUT,   // 加密输入输出1
-        TEEC_MEMREF_TEMP_INPUT,   // 加密输入输出2
-        TEEC_VALUE_INPUT,  // 
+        TEEC_MEMREF_TEMP_INOUT,
+        TEEC_MEMREF_TEMP_INPUT, 
+        TEEC_VALUE_INPUT, 
         TEEC_NONE
     );
     
@@ -105,7 +119,7 @@ bool TEEGNNClient::restore_aggregation(uint32_t layer_idx, Matrix& y1, Matrix& y
     
     // 调用TA
     TEEC_Result result = TEEC_InvokeCommand(
-        &session_, TA_CMD_RESTORE, &op, NULL);
+        &session_, TEEGNN_CMD_RESTORE_AGGREGATION, &op, NULL);
     
     return checkResult(result, "ComputeNonlinearLayer");
 }
@@ -138,7 +152,7 @@ bool TEEGNNClient::nonlinear_layer(
     memset(&op, 0, sizeof(op));
     op.paramTypes = TEEC_PARAM_TYPES(
         TEEC_MEMREF_TEMP_INOUT,   // masked H1_0
-        TEEC_MEMREF_TEMP_OUT,   // masked H1_1
+        TEEC_MEMREF_TEMP_OUTPUT,   // masked H1_1
         TEEC_VALUE_INPUT,  // layer_idx and activation
         TEEC_NONE
     );
@@ -154,11 +168,11 @@ bool TEEGNNClient::nonlinear_layer(
     op.params[1].tmpref.size = rows * cols * sizeof(double);
     
     op.params[2].value.a = encoded_size;  // 高16位: layer_idx, 低16位: activation
-    op.params[2].value.b = linear_output.cols();  // 特征维度
+    op.params[2].value.b = cols;  // 特征维度
     
     // 调用TA
     TEEC_Result result = TEEC_InvokeCommand(
-        &session_, TA_CMD_NONLINEAR_LAYER, &op, NULL);
+        &session_, TEEGNN_CMD_APPLY_ACTIVATION, &op, NULL);
     
     return checkResult(result, "ComputeNonlinearLayer");
 }
@@ -168,7 +182,7 @@ void TEEGNNClient::cleanup() {
         // 清理TA上下文
         TEEC_Operation op;
         memset(&op, 0, sizeof(op));
-        TEEC_InvokeCommand(&session_, TA_CMD_CLEANUP_CONTEXT, &op, NULL);
+        TEEC_InvokeCommand(&session_, TEEGNN_CMD_FINALIZE_RESULT, &op, NULL);
         
         // 关闭会话
         TEEC_CloseSession(&session_);
@@ -226,3 +240,5 @@ bool TEEGNNClient::checkResult(TEEC_Result result, const std::string& operation)
     }
     return true;
 }
+
+}  // namespace teegnn

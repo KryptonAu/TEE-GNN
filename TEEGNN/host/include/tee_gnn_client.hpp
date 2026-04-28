@@ -1,13 +1,13 @@
 #pragma once
 
-#include <Eigen/Dense>
 #include <vector>
 #include <string>
 #include <tee_client_api.h>
 
+#include "types.hpp"
 #include "teegnn_ta.h"
 
-using Matrix = Eigen::MatrixXd;
+namespace teegnn {
 
 class TEEGNNClient {
 public:
@@ -19,7 +19,7 @@ public:
     
     // 初始化GNN上下文
     bool init_GNNContext(int num_vertices, int rank, 
-                         const std::vector<uint32_t>& lmm_u);
+                         const std::vector<Matrix>& lmm_u);
     
     bool restore_aggregation(uint32_t layer_idx, Matrix& y1, Matrix& y2);
 
@@ -40,3 +40,5 @@ private:
     // 检查TEE操作结果
     bool checkResult(TEEC_Result result, const std::string& operation);
 };
+
+}  // namespace teegnn

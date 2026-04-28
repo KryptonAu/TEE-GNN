@@ -153,8 +153,9 @@ int main(void)
 
     puts("");
     puts("second pass after re-initialization");
+    size_t len = sizeof(stream_ids) / sizeof(stream_ids[0]);
     for (i = 0; i < sizeof(stream_ids) / sizeof(stream_ids[0]); ++i) {
-        rc = capture_stream_sample(&master_b, stream_ids[i], "demo", &second_pass[i]);
+        rc = capture_stream_sample(&master_b, stream_ids[len - i - 1], "demo", &second_pass[i]);
         if (rc != CSPRNG_OK) {
             fprintf(stderr, "capture_stream_sample(second pass, %" PRIu64 ") failed: %d\n",
                     stream_ids[i],

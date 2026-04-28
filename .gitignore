@@ -48,3 +48,6 @@ Thumbs.db
 gcn_nonlinear/
 test/
 common/.build_test/
+optee_client/
+optee_os/
+compile_commands.json

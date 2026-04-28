@@ -1,25 +1,13 @@
-# SPDX-License-Identifier: BSD-2-Clause
 
-HOST_APP := teegnn_host
+export V?=0
 
-OPTEE_CLIENT_EXPORT ?= /opt/optee_client
-TA_DEV_KIT_DIR ?= /opt/optee_os/out/arm/export-ta_arm32
-TEEC_EXPORT ?= $(OPTEE_CLIENT_EXPORT)
+.PHONY: all
+all:
+	make -C host CROSS_COMPILE=$(HOST_CROSS_COMPILE)
+	make -C ta CROSS_COMPILE=$(TA_CROSS_COMPILE)
 
-HOST_CFLAGS += -Wall -Wextra -O2 -I$(TEEC_EXPORT)/include -Ita/include
-HOST_LDFLAGS += -L$(TEEC_EXPORT)/lib -lteec
-
-.PHONY: all host ta clean
-
-all: host ta
-
-host:
-	$(CC) $(HOST_CFLAGS) -o $(HOST_APP) host/main.c $(HOST_LDFLAGS)
-
-ta:
-	$(MAKE) -C ta TA_DEV_KIT_DIR=$(TA_DEV_KIT_DIR)
-
+.PHONY: clean
 clean:
-	rm -f $(HOST_APP)
-	$(MAKE) -C ta clean TA_DEV_KIT_DIR=$(TA_DEV_KIT_DIR)
-
+	make -C host clean
+	make -C ta clean
+	

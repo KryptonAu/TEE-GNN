@@ -5,6 +5,7 @@
 
 #include "tee_gnn_client.hpp"
 
+#include <Eigen/src/Core/Matrix.h>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -105,6 +106,7 @@ InferencePhaseResult run_secure_inference(teegnn::MaskedData& masked_data,
     teegnn::Matrix output;
     teegnn::Matrix &y1 = masked_data.features.share1;
     teegnn::Matrix &y2 = masked_data.features.share2;
+    teegnn::IntVector debug_info;
     for (int layer = 0; layer < 2; ++layer) {
         y1 = ree_masked_sparse_dense(num_nodes, 
             masked_data.graph_shares.a1, y1);
@@ -113,6 +115,9 @@ InferencePhaseResult run_secure_inference(teegnn::MaskedData& masked_data,
         
         // y1 = result
         secure->restore_aggregation(layer, y1, y2);
+
+        debug_info.resize(y1.cols());
+        secure->get_debug_info(debug_info);
 
         y1 *= masked_data.weights[layer];
         y2 = Eigen::MatrixXd::Zero(y1.rows(), y1.cols()); // dummy for secure computation
@@ -148,6 +153,11 @@ int main(int argc, char** argv) {
         }
 
         teegnn::MaskPhaseResult masks = teegnn::run_mask_phase(dataset, options);
+
+        for (int i = 0; i < masks.matrices.sdim_masks[0].dim(); ++i) {
+            std::cout << masks.matrices.sdim_masks[0].h(i) << " ";
+        }
+        std::cout << std::endl;
 
         std::unique_ptr<teegnn::TEEGNNClient> secure = std::make_unique<teegnn::TEEGNNClient>();
         if (!secure->initialize()) {

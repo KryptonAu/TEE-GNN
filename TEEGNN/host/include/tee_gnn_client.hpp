@@ -28,6 +28,8 @@ public:
                          Matrix& linear_output,
                          Matrix& h_share,
                          const std::string& activation);
+
+    bool get_debug_info(IntVector& debug_info);
     
     // 清理资源
     void cleanup();

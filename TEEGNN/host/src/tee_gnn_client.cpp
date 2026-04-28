@@ -153,8 +153,6 @@ bool TEEGNNClient::nonlinear_layer(
     
     uint32_t rows = linear_output.rows();
     uint32_t cols = linear_output.cols();
-
-    Matrix debug_info(rows, cols);
     
     // 设置操作
     TEEC_Operation op;
@@ -184,6 +182,32 @@ bool TEEGNNClient::nonlinear_layer(
         &session_, TEEGNN_CMD_APPLY_ACTIVATION, &op, NULL);
     
     return checkResult(result, "ComputeNonlinearLayer");
+}
+
+bool TEEGNNClient::get_debug_info(IntVector& debug_info) {
+    if (!initialized_) {
+        std::cerr << "TEE client not initialized" << std::endl;
+        return false;
+    }
+    TEEC_Operation op;
+    memset(&op, 0, sizeof(op));
+    op.paramTypes = TEEC_PARAM_TYPES(
+        TEEC_MEMREF_TEMP_OUTPUT,
+        TEEC_NONE, 
+        TEEC_NONE, 
+        TEEC_NONE
+    );
+    op.params[0].tmpref.buffer = (void*)debug_info.data();
+    op.params[0].tmpref.size = debug_info.size() * sizeof(int);
+    
+    TEEC_Result result = TEEC_InvokeCommand(
+        &session_, TEEGNN_CMD_GET_DEBUG_INFO, &op, NULL);
+
+    for (int i = 0; i < debug_info.size(); ++i) {
+        std::cout << debug_info[i] << " ";
+    }
+    std::cout << std::endl;
+    return checkResult(result, "GetDebugInfo");
 }
 
 void TEEGNNClient::cleanup() {

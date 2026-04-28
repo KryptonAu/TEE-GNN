@@ -176,7 +176,7 @@ int teegnn_random_matrix(teegnn_random_engine_t *engine,
                          size_t out_len) {
     size_t i;
     size_t total;
-    int64_t value;
+    int32_t value;
     int rc;
 
     if (engine == NULL || row_major_out == NULL) {

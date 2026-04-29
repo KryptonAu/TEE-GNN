@@ -47,6 +47,7 @@ Thumbs.db
 # Local project directories
 gcn_nonlinear/
 test/
+test_debug/
 common/.build_test/
 optee_client/
 optee_os/

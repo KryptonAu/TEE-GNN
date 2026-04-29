@@ -647,13 +647,12 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
 /* 还原邻居聚合结果 */
 static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4]) {
     uint32_t exp_param_types = TEE_PARAM_TYPES(
-        TEE_PARAM_TYPE_MEMREF_INOUT,   // 矩阵1
-        TEE_PARAM_TYPE_MEMREF_INPUT,   // 矩阵2
+        TEE_PARAM_TYPE_MEMREF_INOUT,   // y1
+        TEE_PARAM_TYPE_MEMREF_INPUT,   // y2
         TEE_PARAM_TYPE_VALUE_INPUT,
         TEE_PARAM_TYPE_NONE
     );
     TEE_Result res;
-    int32_t *lmm_v = ctx->lmm_v;
     size_t matrix_len;
     size_t matrix_bytes;
     size_t lmm_v_len;
@@ -709,7 +708,7 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
     spm_unmask(y1, ctx->temp_matrix.data, &ctx->n_SPM[0], &ctx->m_SPM[0], false);
     spm_unmask(y2, ctx->temp_matrix.data, &ctx->n_SPM[2], &ctx->m_SPM[1], true);
 
-    if (ctx->rank != 0U && lmm_v == NULL) {
+    if (ctx->rank != 0U && layer_idx == 0U) {
         if (feature_dim > SIZE_MAX / ctx->rank) {
             return TEE_ERROR_BAD_PARAMETERS;
         }
@@ -718,17 +717,17 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
             return TEE_ERROR_BAD_PARAMETERS;
         }
         lmm_v_bytes = lmm_v_len * sizeof(int32_t);
-        lmm_v = TEE_Malloc(lmm_v_bytes, 0);
-        if (lmm_v == NULL) {
+        ctx->lmm_v = TEE_Malloc(lmm_v_bytes, 0);
+        if (ctx->lmm_v == NULL) {
             return TEE_ERROR_OUT_OF_MEMORY;
         }
         for (size_t i = 0; i < feature_dim * ctx->rank; i++) {
             int32_t value;
             if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
-                TEE_Free(lmm_v);
+                TEE_Free(ctx->lmm_v);
                 return TEE_ERROR_BAD_STATE;
             }
-            lmm_v[i] = value;
+            ctx->lmm_v[i] = value;
         }
     }
 
@@ -736,14 +735,14 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
         for (size_t i = 0; i < ctx->num_vertices; i++) {
             double masked_val = 0.0;
             for (size_t k = 0; k < ctx->rank; k++) {
-                masked_val -= ctx->lmm_u[layer_idx][i + k * ctx->num_vertices] *
-                              (double)lmm_v[j + k * feature_dim];
+                masked_val += ctx->lmm_u[layer_idx][i + k * ctx->num_vertices] *
+                              (double)ctx->lmm_v[j + k * feature_dim];
             }
             ctx->temp_matrix.data[i + j * ctx->num_vertices] -= masked_val;
         }
     }
-    TEE_Free(lmm_v);
-    lmm_v = NULL;
+    TEE_Free(ctx->lmm_v);
+    ctx->lmm_v = NULL;
 
     res = generate_sdim(&ctx->rng_temp, ctx->num_vertices, &ctx->temp_SDIM[0]);
     if (res != TEE_SUCCESS) {
@@ -774,7 +773,6 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
     );
     TEE_Result res;
     int32_t *lmm_u = NULL;
-    int32_t *lmm_v = ctx->lmm_v;
     size_t matrix_len;
     size_t matrix_bytes;
     size_t lmm_u_len;
@@ -852,10 +850,10 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
                 return TEE_ERROR_BAD_PARAMETERS;
             }
             lmm_u = TEE_Malloc(lmm_u_len * sizeof(int32_t), 0);
-            lmm_v = TEE_Malloc(lmm_v_len * sizeof(int32_t), 0);
-            if (lmm_u == NULL || lmm_v == NULL) {
+            ctx->lmm_v = TEE_Malloc(lmm_v_len * sizeof(int32_t), 0);
+            if (lmm_u == NULL || ctx->lmm_v == NULL) {
                 TEE_Free(lmm_u);
-                TEE_Free(lmm_v);
+                TEE_Free(ctx->lmm_v);
                 return TEE_ERROR_OUT_OF_MEMORY;
             }
         }
@@ -864,7 +862,7 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
             int32_t value;
             if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
                 TEE_Free(lmm_u);
-                TEE_Free(lmm_v);
+                TEE_Free(ctx->lmm_v);
                 return TEE_ERROR_BAD_STATE;
             }
             lmm_u[i] = value;
@@ -873,10 +871,10 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
             int32_t value;
             if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
                 TEE_Free(lmm_u);
-                TEE_Free(lmm_v);
+                TEE_Free(ctx->lmm_v);
                 return TEE_ERROR_BAD_STATE;
             }
-            lmm_v[i] = value;
+            ctx->lmm_v[i] = value;
         }
 
         for (size_t j = 0; j < feature_dim; j++) {
@@ -884,9 +882,9 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
                 double masked_val = 0.0;
                 for (size_t k = 0; k < ctx->rank; k++) {
                     masked_val += (double)lmm_u[i + k * ctx->num_vertices] *
-                                (double)lmm_v[j + k * feature_dim];
+                                (double)ctx->lmm_v[j + k * feature_dim];
                 }
-                ctx->temp_matrix.data[i + j * ctx->num_vertices] -= masked_val;
+                ctx->temp_matrix.data[i + j * ctx->num_vertices] += masked_val;
             }
         }
         TEE_Free(lmm_u);

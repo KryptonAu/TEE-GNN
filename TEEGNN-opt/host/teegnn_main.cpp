@@ -1,9 +1,11 @@
-#include "csprng_adapter.hpp"
 #include "dataset_loader.hpp"
 #include "gcn_ops.hpp"
 #include "masks.hpp"
 #include "types.hpp"
 
+#include "tee_gnn_client.hpp"
+
+#include <Eigen/src/Core/Matrix.h>
 #include <chrono>
 #include <cmath>
 #include <exception>
@@ -92,63 +94,41 @@ teegnn::Options parse_args(int argc, char** argv) {
     return options;
 }
 
-class secure_computation {
-public:
-    secure_computation(teegnn::MaskMatrices&& masks)
-        : masks_(std::move(masks)), rng_(23333, 0, "teegnn-temp") {}
-
-    teegnn::Matrix restore_aggregation(const teegnn::Matrix& y1,
-                                       const teegnn::Matrix& y2,
-                                       int layer) {
-        teegnn::Matrix restored = teegnn::apply_SPM_inv(masks_.p1, masks_.p3, y1);
-        teegnn::Matrix second = teegnn::apply_SPM_inv(masks_.p4, masks_.p6, y2);
-        restored.noalias() += second;
-        restored.noalias() -= masks_.precompute_Ahat_u[layer] * masks_.lr_masks[layer].v.transpose();
-
-        temp = teegnn::SDIMMask::random(restored.rows(), rng_);
-        return teegnn::apply_SDIM(temp, masks_.sdim_masks[layer * 2], restored);
-    }
-
-    teegnn::MaskedFeature nonlinear_layer(const teegnn::Matrix& linear_output, int layer) {
-        teegnn::Matrix z = teegnn::apply_SDIM_inv(temp, masks_.sdim_masks[layer * 2 + 1], linear_output);
-        if (layer == 0) {
-            z = teegnn::relu(z);
-            masks_.p3 = teegnn::ScaledPermutation::random(z.cols(), rng_);
-            masks_.p6 = teegnn::ScaledPermutation::random(z.cols(), rng_);
-            return feature_mask(
-                z, masks_.lr_masks[1], masks_.p2, masks_.p3,
-                masks_.p5, masks_.p6);      
-        } else {
-            return {z, z};  // identity for the second layer
-        }
-    }
-
-private:
-    teegnn::MaskMatrices masks_;
-    teegnn::SDIMMask temp;
-    teegnn::RandomEngine rng_;
-};
-
-InferencePhaseResult run_inference_phase(size_t n,
-                                         teegnn::MaskedData& masked_data,
-                                         secure_computation& secure,
-                                         std::vector<teegnn::TimerRecord>& timings) {
+InferencePhaseResult run_secure_inference(teegnn::MaskedData& masked_data,
+                                          const std::unique_ptr<teegnn::TEEGNNClient> &secure,
+                                          std::vector<teegnn::TimerRecord>& timings) {
     ScopedTimer timer(timings, "teegnn_inference_phase");
 
     InferencePhaseResult result;
+
+    size_t num_nodes = masked_data.graph_shares.a1.size();
     
     teegnn::Matrix output;
+    teegnn::Matrix &y1 = masked_data.features.share1;
+    teegnn::Matrix &y2 = masked_data.features.share2;
+    teegnn::IntVector debug_info;
     for (int layer = 0; layer < 2; ++layer) {
-        teegnn::Matrix y1 = ree_masked_sparse_dense(n, 
-            masked_data.graph_shares.a1, masked_data.features.share1);
-        teegnn::Matrix y2 = ree_masked_sparse_dense(n, 
-            masked_data.graph_shares.a2, masked_data.features.share2);
+        y1 = ree_masked_sparse_dense(num_nodes, 
+            masked_data.graph_shares.a1, y1);
+        y2 = ree_masked_sparse_dense(num_nodes, 
+            masked_data.graph_shares.a2, y2);
         
-        teegnn::Matrix masked_xbar = secure.restore_aggregation(y1, y2, layer);
+        // y1 = result
+        secure->restore_aggregation(layer, y1, y2);
 
-        masked_data.features = secure.nonlinear_layer(masked_xbar * masked_data.weights[layer], layer);
+        debug_info.resize(y1.cols());
+        secure->get_debug_info(debug_info);
+
+        y1 *= masked_data.weights[layer];
+        y2 = Eigen::MatrixXd::Zero(y1.rows(), y1.cols()); // dummy for secure computation
+        
+        if (layer == 0) {
+            secure->nonlinear_layer(layer, y1, y2, "ReLU");
+        } else {
+            secure->nonlinear_layer(layer, y1, y2, "SoftMax");
+        }
     }
-    result.logits = masked_data.features.share1; 
+    result.logits = y1; 
     return result;
 }
 
@@ -173,9 +153,22 @@ int main(int argc, char** argv) {
         }
 
         teegnn::MaskPhaseResult masks = teegnn::run_mask_phase(dataset, options);
-        secure_computation secure(std::move(masks.matrices));
+
+        for (int i = 0; i < masks.matrices.sdim_masks[0].dim(); ++i) {
+            std::cout << masks.matrices.sdim_masks[0].h(i) << " ";
+        }
+        std::cout << std::endl;
+
+        std::unique_ptr<teegnn::TEEGNNClient> secure = std::make_unique<teegnn::TEEGNNClient>();
+        if (!secure->initialize()) {
+            throw std::runtime_error("Failed to initialize TEE client");
+        }
+        if (!secure->init_GNNContext(dataset.graph.num_nodes(), options.mask_rank, masks.matrices.precompute_Ahat_u)) {
+            throw std::runtime_error("Failed to initialize GNN context in TEE");
+        }
+
         const InferencePhaseResult inference =
-            run_inference_phase(dataset.graph.num_nodes(), masks.data, secure, timings);
+            run_secure_inference(masks.data, secure, timings);
 
         teegnn::IntVector predictions;
         double teegnn_accuracy = 0.0;

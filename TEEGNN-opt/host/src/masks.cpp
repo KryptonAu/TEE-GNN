@@ -356,12 +356,13 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset,
     matrices.p2 = ScaledPermutation::random(matrices.node_count, rng_spm);
     matrices.p4 = ScaledPermutation::random(matrices.node_count, rng_spm);
     matrices.p5 = ScaledPermutation::random(matrices.node_count, rng_spm);
+    
+    matrices.p3 = ScaledPermutation::random(matrices.feature_dim, rng_spm);
+    matrices.p6 = ScaledPermutation::random(matrices.feature_dim, rng_spm);
+
     masked_data.graph_shares =
         protect_graph_edges(dataset.graph, options.confusion_rate, matrices.p1, matrices.p2,
                                     matrices.p4, matrices.p5, rng_spm);
-
-    matrices.p3 = ScaledPermutation::random(matrices.feature_dim, rng_spm);
-    matrices.p6 = ScaledPermutation::random(matrices.feature_dim, rng_spm);
 
     matrices.lr_masks.emplace_back(
         make_low_rank_mask(matrices.node_count, 

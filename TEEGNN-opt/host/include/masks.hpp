@@ -130,11 +130,11 @@ struct MaskPhaseResult {
 };
 
 MaskedFeature feature_mask(const teegnn::Matrix& x,
-                                             const teegnn::LowRankMask& low_rank_mask,
-                                             const teegnn::ScaledPermutation& left1,
-                                             const teegnn::ScaledPermutation& right1,
-                                             const teegnn::ScaledPermutation& left2,
-                                             const teegnn::ScaledPermutation& right2);
+                           const teegnn::LowRankMask& low_rank_mask,
+                           const teegnn::ScaledPermutation& left1,
+                           const teegnn::ScaledPermutation& right1,
+                           const teegnn::ScaledPermutation& left2,
+                           const teegnn::ScaledPermutation& right2);
 
 teegnn::MaskPhaseResult run_mask_phase(const teegnn::Dataset& dataset,
                                        const Options& options);

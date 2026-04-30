@@ -68,45 +68,6 @@ ScaledPermutation ScaledPermutation::random(int dim, RandomEngine& rng) {
     return ScaledPermutation(std::move(permutation), std::move(scale));
 }
 
-Matrix ScaledPermutation::apply_left(const Matrix& x) const {
-    require_square_dim(dim(), x.rows(), "left P");
-    Matrix out(x.rows(), x.cols());
-    for (int i = 0; i < dim(); ++i) {
-        out.row(i) = scale_[static_cast<std::size_t>(i)] * x.row(permutation_[static_cast<std::size_t>(i)]);
-    }
-    return out;
-}
-
-Matrix ScaledPermutation::apply_left_inv(const Matrix& x) const {
-    require_square_dim(dim(), x.rows(), "left P inverse");
-    Matrix out(x.rows(), x.cols());
-    for (int i = 0; i < dim(); ++i) {
-        out.row(permutation_[static_cast<std::size_t>(i)]) =
-            x.row(i) / scale_[static_cast<std::size_t>(i)];
-    }
-    return out;
-}
-
-Matrix ScaledPermutation::apply_right(const Matrix& x) const {
-    require_square_dim(dim(), x.cols(), "right P");
-    Matrix out(x.rows(), x.cols());
-    for (int i = 0; i < dim(); ++i) {
-        out.col(permutation_[static_cast<std::size_t>(i)]) =
-            scale_[static_cast<std::size_t>(i)] * x.col(i);
-    }
-    return out;
-}
-
-Matrix ScaledPermutation::apply_right_inv(const Matrix& x) const {
-    require_square_dim(dim(), x.cols(), "right P inverse");
-    Matrix out(x.rows(), x.cols());
-    for (int i = 0; i < dim(); ++i) {
-        out.col(i) = x.col(permutation_[static_cast<std::size_t>(i)]) /
-                     scale_[static_cast<std::size_t>(i)];
-    }
-    return out;
-}
-
 Matrix apply_SPM(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x) {
     int r = L.dim();
     int c = R.dim();
@@ -133,21 +94,6 @@ Matrix apply_SPM_inv(const ScaledPermutation& L, const ScaledPermutation& R, con
         }
     }
     return out;
-}
-
-Matrix LowRankMask::materialize() const {
-    return u * v.transpose();
-}
-
-Matrix LowRankMask::ahat_times_mask(const Graph& graph) const {
-    return sparse_dense_mul(graph, u) * v.transpose();
-}
-
-LowRankMask make_low_rank_mask(int rows, int cols, int rank, RandomEngine& rng) {
-    if (rank <= 0) {
-        return {Matrix::Zero(rows, 0), Matrix::Zero(cols, 0)};
-    }
-    return {rng.random_matrix(rows, rank), rng.random_matrix(cols, rank)};
 }
 
 SDIMMask::SDIMMask(ScaledPermutation p, Vector h)
@@ -259,8 +205,6 @@ Matrix apply_SDIM_inv(const SDIMMask& L, const SDIMMask& R, const Matrix& x) {
     return out;
 }
 
-namespace {
-
 WeightedEdge transform_share_edge(const WeightedEdge& edge,
                                   double value,
                                   const ScaledPermutation& left,
@@ -272,8 +216,6 @@ WeightedEdge transform_share_edge(const WeightedEdge& edge,
         right.scale()[static_cast<std::size_t>(protected_col)];
     return {protected_row, protected_col, protected_value};
 }
-
-}  // namespace
 
 ProtectedGraphShares protect_graph_edges(const Graph& graph,
                                          double confusion_rate,
@@ -326,19 +268,7 @@ ProtectedGraphShares protect_graph_edges(const Graph& graph,
     return shares;
 }
 
-MaskedFeature feature_mask(const Matrix& x,
-                                             const LowRankMask& low_rank_mask,
-                                             const ScaledPermutation& left1,
-                                             const ScaledPermutation& right1,
-                                             const ScaledPermutation& left2,
-                                             const ScaledPermutation& right2) {
-    Matrix masked = x + low_rank_mask.materialize();                                            
-    return {apply_SPM(left1, right1, masked),
-            apply_SPM(left2, right2, masked)};
-}
-
-MaskPhaseResult run_mask_phase(const Dataset& dataset,
-                                       const Options& options) {
+MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
     RandomEngine rng_spm(options.seed, 0, "teegnn-spm");
     RandomEngine rng_lmm(options.seed, 1, "teegnn-lmm");
     RandomEngine rng_sdim(options.seed, 2, "teegnn-sdim");                       
@@ -352,40 +282,29 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset,
     matrices.hidden_dim = static_cast<int>(dataset.w1.cols());
     const int class_dim = static_cast<int>(dataset.w2.cols());
 
-    matrices.p1 = ScaledPermutation::random(matrices.node_count, rng_spm);
-    matrices.p2 = ScaledPermutation::random(matrices.node_count, rng_spm);
-    matrices.p4 = ScaledPermutation::random(matrices.node_count, rng_spm);
-    matrices.p5 = ScaledPermutation::random(matrices.node_count, rng_spm);
-    
-    matrices.p3 = ScaledPermutation::random(matrices.feature_dim, rng_spm);
-    matrices.p6 = ScaledPermutation::random(matrices.feature_dim, rng_spm);
+    matrices.spm_n.emplace_back(ScaledPermutation::random(matrices.node_count, rng_spm));
+    matrices.spm_n.emplace_back(ScaledPermutation::random(matrices.node_count, rng_spm));
+    matrices.spm_n.emplace_back(ScaledPermutation::random(matrices.node_count, rng_spm));
+    matrices.spm_n.emplace_back(ScaledPermutation::random(matrices.node_count, rng_spm));
 
     masked_data.graph_shares =
-        protect_graph_edges(dataset.graph, options.confusion_rate, matrices.p1, matrices.p2,
-                                    matrices.p4, matrices.p5, rng_spm);
+        protect_graph_edges(dataset.graph, options.confusion_rate, 
+                            matrices.spm_n[0], matrices.spm_n[1],
+                            matrices.spm_n[2], matrices.spm_n[3], rng_spm);
 
-    matrices.lr_masks.emplace_back(
-        make_low_rank_mask(matrices.node_count, 
-                                   matrices.feature_dim, 
-                                   options.mask_rank, rng_lmm));
-    matrices.lr_masks.emplace_back(
-        make_low_rank_mask(matrices.node_count, 
-                                   matrices.hidden_dim, 
-                                   options.mask_rank, rng_lmm));
-    matrices.precompute_Ahat_u.emplace_back(sparse_dense_mul(dataset.graph, matrices.lr_masks[0].u));  
-    matrices.precompute_Ahat_u.emplace_back(sparse_dense_mul(dataset.graph, matrices.lr_masks[1].u));  
+    matrices.precompute_Ahat_u.emplace_back(sparse_dense_mul(dataset.graph, 
+                rng_lmm.random_matrix(matrices.node_count, options.mask_rank)));  
+    matrices.precompute_Ahat_u.emplace_back(sparse_dense_mul(dataset.graph, 
+                rng_lmm.random_matrix(matrices.node_count, options.mask_rank)));  
     
-    masked_data.features = feature_mask(dataset.features, matrices.lr_masks[0], 
-                                    matrices.p2, matrices.p3,
-                                    matrices.p5, matrices.p6);
-
     {
-        SDIMMask s_left = SDIMMask::random(matrices.feature_dim, rng_sdim);
-        SDIMMask s_right = SDIMMask::random(matrices.hidden_dim, rng_sdim);
-        masked_data.weights.push_back(apply_SDIM(s_left, s_right, dataset.w1));
+        SDIMMask s_right = SDIMMask::random(matrices.feature_dim, rng_sdim);
+        SDIMMask s_left = SDIMMask::random(matrices.node_count, rng_sdim);
+        masked_data.features = apply_SDIM(s_left, s_right, dataset.features);
         matrices.sdim_masks.push_back(std::move(s_left));
         matrices.sdim_masks.push_back(std::move(s_right));
     }
+    masked_data.weights.push_back(dataset.w1);
     {
         SDIMMask s_left = SDIMMask::random(matrices.hidden_dim, rng_sdim);
         SDIMMask s_right = SDIMMask::random(class_dim, rng_sdim);

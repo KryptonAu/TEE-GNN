@@ -43,9 +43,7 @@ typedef struct {
     
     /* 参数 */
     size_t num_vertices;
-    size_t current_layer;  // 当前层索引
     size_t rank;           // 低秩掩码的秩
-    size_t feature_dim;      // 特征维度
 
     /* 预计算Ahat * u */
     double** lmm_u;
@@ -189,7 +187,6 @@ static void free_context_buffers(gnn_context_t *context) {
         free_spm(&context->m_SPM[i]);
     }
     free_matrix(&context->temp_matrix);
-    context->feature_dim = 0;
 }
 
 static TEE_Result generate_spm(teegnn_random_engine_t *engine, size_t n, SPM *spm) {
@@ -318,26 +315,11 @@ static TEE_Result regenerate_feature_spms(gnn_context_t *context, size_t feature
             for (size_t j = 0; j < 2; ++j) {
                 free_spm(&context->m_SPM[j]);
             }
-            context->feature_dim = 0;
             return res;
         }
     }
 
-    context->feature_dim = feature_dim;
     return TEE_SUCCESS;
-}
-
-static TEE_Result ensure_feature_spms(gnn_context_t *context, size_t feature_dim) {
-    if (context == NULL || feature_dim == 0) {
-        return TEE_ERROR_BAD_PARAMETERS;
-    }
-    if (context->feature_dim == feature_dim &&
-        context->m_SPM[0].perm != NULL &&
-        context->m_SPM[1].perm != NULL) {
-        return TEE_SUCCESS;
-    }
-
-    return regenerate_feature_spms(context, feature_dim);
 }
 
 // matrices are in column-major order.
@@ -533,10 +515,10 @@ void TA_CloseSessionEntryPoint(void* sess_ctx) {
 /* 初始化上下文 */
 static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
     uint32_t exp_param_types = TEE_PARAM_TYPES(
-        TEE_PARAM_TYPE_MEMREF_INPUT,  // low_rank_mask precomp
+        TEE_PARAM_TYPE_MEMREF_INOUT,  // w1
+        TEE_PARAM_TYPE_MEMREF_INPUT,  // low_rank_mask precompute
         TEE_PARAM_TYPE_VALUE_INPUT,   // num_vertices, rank
-        TEE_PARAM_TYPE_NONE,
-        TEE_PARAM_TYPE_NONE
+        TEE_PARAM_TYPE_VALUE_INPUT    // feature_dim, hidden_dim
     );
     TEE_Result res;
     const uint8_t *lmm_buffer;
@@ -544,6 +526,8 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
     size_t lmm_bytes;
     size_t expected_bytes;
     size_t offset = 0;
+    size_t feature_dim;
+    size_t hidden_dim;
     
     if (param_types != exp_param_types) {
         return TEE_ERROR_BAD_PARAMETERS;
@@ -569,10 +553,10 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
         return TEE_ERROR_BAD_STATE;
     }
 
-    // 解析参数
-    ctx->num_vertices = params[1].value.a;
-    ctx->rank = params[1].value.b;
-    ctx->feature_dim = 0;
+    ctx->num_vertices = params[2].value.a;
+    ctx->rank = params[2].value.b;
+    feature_dim = params[3].value.a;
+    hidden_dim = params[3].value.b;
     if (ctx->num_vertices == 0) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
@@ -580,6 +564,31 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
     if (ctx->rank != 0 && ctx->num_vertices > SIZE_MAX / ctx->rank) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
+
+    // sdim_mask for w1
+    double *w1 = (double*)params[0].memref.buffer;
+    res = generate_sdim(&ctx->rng_temp, hidden_dim, &ctx->temp_SDIM[0]);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+    res = generate_sdim(&ctx->rng_sdim, feature_dim, &ctx->temp_SDIM[1]);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+
+    free_matrix(&ctx->temp_matrix);
+    res = init_matrix(&ctx->temp_matrix, feature_dim, hidden_dim);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+    
+    res = sdim_mask(w1, ctx->temp_matrix.data, &ctx->temp_SDIM[1], &ctx->temp_SDIM[0]);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+    memcpy(w1, ctx->temp_matrix.data, feature_dim * hidden_dim * sizeof(double));
+
+    // initialize lmm_u precompute
     lmm_len = ctx->rank * ctx->num_vertices;
     if (lmm_len > SIZE_MAX / sizeof(double)) {
         return TEE_ERROR_BAD_PARAMETERS;
@@ -589,12 +598,12 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
     expected_bytes = 2U * lmm_bytes;
-    if (params[0].memref.size != expected_bytes ||
-        (expected_bytes != 0U && params[0].memref.buffer == NULL)) {
+    if (params[1].memref.size != expected_bytes ||
+        (expected_bytes != 0U && params[1].memref.buffer == NULL)) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
 
-    lmm_buffer = (const uint8_t *)params[0].memref.buffer;
+    lmm_buffer = (const uint8_t *)params[1].memref.buffer;
     ctx->lmm_u = TEE_Malloc(2U * sizeof(*ctx->lmm_u), 0);
     if (ctx->lmm_u == NULL) {
         return TEE_ERROR_OUT_OF_MEMORY;
@@ -623,40 +632,24 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
         }
     }
 
-    /*
-     * The right-side feature SPMs depend on feature_dim, which is only known
-     * when restore_aggregation() receives its first matrix.  Generating them
-     * here used feature_dim == 0 and reported TEE_ERROR_OUT_OF_MEMORY on
-     * OP-TEE because TEE_Malloc(0) returns NULL.
-     */
-
-    // skip first n * rank values for low_rank_mask precomp
-    for (size_t i = 0; i < ctx->num_vertices * ctx->rank; i++) {
-        int32_t value;
-        if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
-            free_context_buffers(ctx);
-            return TEE_ERROR_BAD_STATE;
-        }
-    }
-    
     ctx->initialized = true;
     
     return TEE_SUCCESS;
 }
 
-/* 还原邻居聚合结果 */
-static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4]) {
+static TEE_Result remask(uint32_t param_types, TEE_Param params[4]) {
     uint32_t exp_param_types = TEE_PARAM_TYPES(
-        TEE_PARAM_TYPE_MEMREF_INOUT,   // y1
-        TEE_PARAM_TYPE_MEMREF_INPUT,   // y2
+        TEE_PARAM_TYPE_MEMREF_INOUT,    // y1
+        TEE_PARAM_TYPE_MEMREF_OUTPUT,   // y2
         TEE_PARAM_TYPE_VALUE_INPUT,
         TEE_PARAM_TYPE_NONE
     );
     TEE_Result res;
     size_t matrix_len;
     size_t matrix_bytes;
+    int32_t *lmm_u = NULL;
+    size_t lmm_u_len;
     size_t lmm_v_len;
-    size_t lmm_v_bytes;
     
     if (param_types != exp_param_types) {
         return TEE_ERROR_BAD_PARAMETERS;
@@ -666,7 +659,6 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
         return TEE_ERROR_BAD_STATE;
     }
 
-    // 从参数中提取附加信息
     uint32_t layer_idx = params[2].value.a;
     uint32_t feature_dim = params[2].value.b;
     if (layer_idx >= 2U || feature_dim == 0U) {
@@ -690,12 +682,6 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
         return TEE_ERROR_BAD_STATE;
     }
 
-    res = ensure_feature_spms(ctx, feature_dim);
-    if (res != TEE_SUCCESS) {
-        return res;
-    }
-
-    // 重置临时矩阵
     free_matrix(&ctx->temp_matrix);
     res = init_matrix(&ctx->temp_matrix, ctx->num_vertices, feature_dim);
     if (res != TEE_SUCCESS) {
@@ -705,25 +691,59 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
     double* y1 = (double*)params[0].memref.buffer;
     double* y2 = (double*)params[1].memref.buffer;
 
-    spm_unmask(y1, ctx->temp_matrix.data, &ctx->n_SPM[0], &ctx->m_SPM[0], false);
-    spm_unmask(y2, ctx->temp_matrix.data, &ctx->n_SPM[2], &ctx->m_SPM[1], true);
+    if (layer_idx == 0U) {
+        res = generate_sdim(&ctx->rng_sdim, ctx->num_vertices, &ctx->temp_SDIM[1]);
+        if (res != TEE_SUCCESS) {
+            return res;
+        }
+        
+        res = sdim_unmask(y1, ctx->temp_matrix.data, &ctx->temp_SDIM[1], &ctx->temp_SDIM[0]);
+        if (res != TEE_SUCCESS) {
+            return res;
+        }
+    } else {
+        res = generate_sdim(&ctx->rng_sdim, feature_dim, &ctx->temp_SDIM[1]);
+        if (res != TEE_SUCCESS) {
+            return res;
+        }
+        
+        res = sdim_unmask(y1, ctx->temp_matrix.data, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
+        if (res != TEE_SUCCESS) {
+            return res;
+        }
+    }
 
-    if (ctx->rank != 0U && layer_idx == 0U) {
-        if (feature_dim > SIZE_MAX / ctx->rank) {
+    if (ctx->rank != 0U) {
+        if (ctx->num_vertices > SIZE_MAX / ctx->rank ||
+            feature_dim > SIZE_MAX / ctx->rank) {
             return TEE_ERROR_BAD_PARAMETERS;
         }
+        lmm_u_len = ctx->num_vertices * ctx->rank;
         lmm_v_len = feature_dim * ctx->rank;
-        if (lmm_v_len > SIZE_MAX / sizeof(int32_t)) {
+        if (lmm_u_len > SIZE_MAX / sizeof(int32_t) ||
+            lmm_v_len > SIZE_MAX / sizeof(int32_t)) {
             return TEE_ERROR_BAD_PARAMETERS;
         }
-        lmm_v_bytes = lmm_v_len * sizeof(int32_t);
-        ctx->lmm_v = TEE_Malloc(lmm_v_bytes, 0);
-        if (ctx->lmm_v == NULL) {
+        lmm_u = TEE_Malloc(lmm_u_len * sizeof(int32_t), 0);
+        ctx->lmm_v = TEE_Malloc(lmm_v_len * sizeof(int32_t), 0);
+        if (lmm_u == NULL || ctx->lmm_v == NULL) {
+            TEE_Free(lmm_u);
+            TEE_Free(ctx->lmm_v);
             return TEE_ERROR_OUT_OF_MEMORY;
+        }
+        
+        for (size_t i = 0; i < ctx->num_vertices * ctx->rank; i++) {
+            int32_t value;
+            if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
+                TEE_Free(lmm_u);
+                TEE_Free(ctx->lmm_v);
+                return TEE_ERROR_BAD_STATE;
+            }
+            lmm_u[i] = value;
         }
         for (size_t i = 0; i < feature_dim * ctx->rank; i++) {
             int32_t value;
-            if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
+            if (teegnn_random_uniform_int(&ctx->rng_temp, -256, 255, &value) != CSPRNG_OK) {
                 TEE_Free(ctx->lmm_v);
                 return TEE_ERROR_BAD_STATE;
             }
@@ -735,30 +755,20 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
         for (size_t i = 0; i < ctx->num_vertices; i++) {
             double masked_val = 0.0;
             for (size_t k = 0; k < ctx->rank; k++) {
-                masked_val += ctx->lmm_u[layer_idx][i + k * ctx->num_vertices] *
+                masked_val += lmm_u[i + k * ctx->num_vertices] *
                               (double)ctx->lmm_v[j + k * feature_dim];
             }
-            ctx->temp_matrix.data[i + j * ctx->num_vertices] -= masked_val;
+            ctx->temp_matrix.data[i + j * ctx->num_vertices] += masked_val;
         }
     }
-    TEE_Free(ctx->lmm_v);
-    ctx->lmm_v = NULL;
+    TEE_Free(lmm_u);
+    lmm_u = NULL;
+    
+    regenerate_feature_spms(ctx, feature_dim);
+    spm_mask(ctx->temp_matrix.data, y1, &ctx->n_SPM[1], &ctx->m_SPM[0]);
+    spm_mask(ctx->temp_matrix.data, y2, &ctx->n_SPM[3], &ctx->m_SPM[1]);
 
-    res = generate_sdim(&ctx->rng_temp, ctx->num_vertices, &ctx->temp_SDIM[0]);
-    if (res != TEE_SUCCESS) {
-        return res;
-    }
-    res = generate_sdim(&ctx->rng_sdim, feature_dim, &ctx->temp_SDIM[1]);
-    if (res != TEE_SUCCESS) {
-        return res;
-    }
-    
-    res = sdim_mask(ctx->temp_matrix.data, y1, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
-    if (res != TEE_SUCCESS) {
-        return res;
-    }
-    
-    DMSG("Restore aggregation layer %u completed", layer_idx);
+    DMSG("remask layer %u completed", layer_idx);
     
     return TEE_SUCCESS;
 }
@@ -766,17 +776,14 @@ static TEE_Result restore_aggregation(uint32_t param_types, TEE_Param params[4])
 /* 非线性层计算 */
 static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
     uint32_t exp_param_types = TEE_PARAM_TYPES(
-        TEE_PARAM_TYPE_MEMREF_INOUT,
-        TEE_PARAM_TYPE_MEMREF_OUTPUT,
+        TEE_PARAM_TYPE_MEMREF_INOUT,    // y1
+        TEE_PARAM_TYPE_MEMREF_INPUT,    // y2
         TEE_PARAM_TYPE_VALUE_INPUT,
         TEE_PARAM_TYPE_NONE
     );
     TEE_Result res;
-    int32_t *lmm_u = NULL;
     size_t matrix_len;
     size_t matrix_bytes;
-    size_t lmm_u_len;
-    size_t lmm_v_len;
     
     if (param_types != exp_param_types) {
         return TEE_ERROR_BAD_PARAMETERS;
@@ -787,8 +794,7 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
     }
     
     // 从参数中提取附加信息
-    uint32_t layer_idx = (params[2].value.a >> 16) & 0xFFFF;
-    uint32_t activation = params[2].value.a & 0xFFFF;
+    uint32_t layer_idx = params[2].value.a;
     uint32_t feature_dim = params[2].value.b;
     if (layer_idx >= 2U || feature_dim == 0U) {
         return TEE_ERROR_BAD_PARAMETERS;
@@ -817,88 +823,43 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
     double* y1 = (double*)params[0].memref.buffer;
     double* y2 = (double*)params[1].memref.buffer;
 
-    res = generate_sdim(&ctx->rng_sdim, feature_dim, &ctx->temp_SDIM[1]);
-    if (res != TEE_SUCCESS) {
-        return res;
-    }
-    
-    res = sdim_unmask(y1, ctx->temp_matrix.data, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
-    if (res != TEE_SUCCESS) {
-        return res;
+    spm_unmask(y1, ctx->temp_matrix.data, &ctx->n_SPM[0], &ctx->m_SPM[0], false);
+    spm_unmask(y2, ctx->temp_matrix.data, &ctx->n_SPM[2], &ctx->m_SPM[1], true);
+    for (size_t j = 0; j < feature_dim; j++) {
+        for (size_t i = 0; i < ctx->num_vertices; i++) {
+            double masked_val = 0.0;
+            for (size_t k = 0; k < ctx->rank; k++) {
+                masked_val += ctx->lmm_u[layer_idx][i + k * ctx->num_vertices] *
+                              (double)ctx->lmm_v[j + k * feature_dim];
+            }
+            ctx->temp_matrix.data[i + j * ctx->num_vertices] -= masked_val;
+        }
     }
 
     // activation
-    if (activation == 0) {  // ReLU
+    if (layer_idx == 0U) {  // ReLU
         apply_relu(&ctx->temp_matrix);
-    } else if (activation == 1) {  // Softmax
+    } else if (layer_idx == 1U) {  // Softmax
         apply_softmax(&ctx->temp_matrix);
     } else {
         return TEE_ERROR_BAD_PARAMETERS;
     }
 
-    if (activation == 0) {  // ReLU
-        // generate low-rank mask for the next protected activation share
-        if (ctx->rank != 0U) {
-            if (ctx->num_vertices > SIZE_MAX / ctx->rank ||
-                feature_dim > SIZE_MAX / ctx->rank) {
-                return TEE_ERROR_BAD_PARAMETERS;
-            }
-            lmm_u_len = ctx->num_vertices * ctx->rank;
-            lmm_v_len = feature_dim * ctx->rank;
-            if (lmm_u_len > SIZE_MAX / sizeof(int32_t) ||
-                lmm_v_len > SIZE_MAX / sizeof(int32_t)) {
-                return TEE_ERROR_BAD_PARAMETERS;
-            }
-            lmm_u = TEE_Malloc(lmm_u_len * sizeof(int32_t), 0);
-            ctx->lmm_v = TEE_Malloc(lmm_v_len * sizeof(int32_t), 0);
-            if (lmm_u == NULL || ctx->lmm_v == NULL) {
-                TEE_Free(lmm_u);
-                TEE_Free(ctx->lmm_v);
-                return TEE_ERROR_OUT_OF_MEMORY;
-            }
+    if (layer_idx == 0U) {  // ReLU
+        res = generate_sdim(&ctx->rng_temp, ctx->num_vertices, &ctx->temp_SDIM[0]);
+        if (res != TEE_SUCCESS) {
+            return res;
         }
-
-        for (size_t i = 0; i < ctx->num_vertices * ctx->rank; i++) {
-            int32_t value;
-            if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
-                TEE_Free(lmm_u);
-                TEE_Free(ctx->lmm_v);
-                return TEE_ERROR_BAD_STATE;
-            }
-            lmm_u[i] = value;
-        }
-        for (size_t i = 0; i < feature_dim * ctx->rank; i++) {
-            int32_t value;
-            if (teegnn_random_uniform_int(&ctx->rng_lmm, -256, 255, &value) != CSPRNG_OK) {
-                TEE_Free(lmm_u);
-                TEE_Free(ctx->lmm_v);
-                return TEE_ERROR_BAD_STATE;
-            }
-            ctx->lmm_v[i] = value;
-        }
-
-        for (size_t j = 0; j < feature_dim; j++) {
-            for (size_t i = 0; i < ctx->num_vertices; i++) {
-                double masked_val = 0.0;
-                for (size_t k = 0; k < ctx->rank; k++) {
-                    masked_val += (double)lmm_u[i + k * ctx->num_vertices] *
-                                (double)ctx->lmm_v[j + k * feature_dim];
-                }
-                ctx->temp_matrix.data[i + j * ctx->num_vertices] += masked_val;
-            }
-        }
-        TEE_Free(lmm_u);
-        lmm_u = NULL;
-
-        // regenerate right-side feature SPMs for the next aggregation restore
-        res = regenerate_feature_spms(ctx, feature_dim);
+        res = generate_sdim(&ctx->rng_sdim, feature_dim, &ctx->temp_SDIM[1]);
         if (res != TEE_SUCCESS) {
             return res;
         }
         
-        spm_mask(ctx->temp_matrix.data, y1, &ctx->n_SPM[1], &ctx->m_SPM[0]);
-        spm_mask(ctx->temp_matrix.data, y2, &ctx->n_SPM[3], &ctx->m_SPM[1]);
-    } else if (activation == 1) {  // Softmax
+        res = sdim_mask(ctx->temp_matrix.data, y1, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
+        if (res != TEE_SUCCESS) {
+            return res;
+        }
+    } else if (layer_idx == 1U) {  // Softmax
         memcpy(y1, ctx->temp_matrix.data,
                ctx->num_vertices * feature_dim * sizeof(double));
         // memcpy(y2, ctx->temp_matrix.data,
@@ -906,8 +867,6 @@ static TEE_Result nonlinear_layer(uint32_t param_types, TEE_Param params[4]) {
     } else {
         return TEE_ERROR_BAD_PARAMETERS;
     }
-    
-    
     
     DMSG("Nonlinear layer %u completed (activation=%u)",
          layer_idx, activation);
@@ -961,8 +920,8 @@ TEE_Result TA_InvokeCommandEntryPoint(void* sess_ctx, uint32_t cmd_id,
     switch (cmd_id) {
         case TEEGNN_CMD_INIT_CONTEXT:
             return init_context(param_types, params);
-        case TEEGNN_CMD_RESTORE_AGGREGATION:
-            return restore_aggregation(param_types, params);
+        case TEEGNN_CMD_REMASK:
+            return remask(param_types, params);
         case TEEGNN_CMD_APPLY_ACTIVATION:
             return nonlinear_layer(param_types, params);
         case TEEGNN_CMD_FINALIZE_RESULT:

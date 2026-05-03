@@ -1,32 +1,21 @@
 #include "gcn_ops.hpp"
 
-#include <chrono>
 #include <stdexcept>
 
 namespace teegnn {
-namespace {
-
-class ScopedTimer {
-public:
-    ScopedTimer(std::vector<TimerRecord>& records, std::string name)
-        : records_(records), name_(std::move(name)), start_(std::chrono::steady_clock::now()) {}
-
-    ~ScopedTimer() {
-        const auto end = std::chrono::steady_clock::now();
-        const double ms = std::chrono::duration<double, std::milli>(end - start_).count();
-        records_.push_back({name_, ms});
-    }
-
-private:
-    std::vector<TimerRecord>& records_;
-    std::string name_;
-    std::chrono::steady_clock::time_point start_;
-};
-
-}  // namespace
 
 Matrix relu(const Matrix& input) {
     return input.cwiseMax(0.0);
+}
+Matrix softmax(const Matrix &input) {
+    Matrix output = input;
+    for (int i = 0; i < input.rows(); ++i) {
+        double max_val = input.row(i).maxCoeff();
+        auto tmp_array = (input.row(i).array() - max_val).exp();
+        double sum_exp = tmp_array.sum();
+        output.row(i) = tmp_array / sum_exp;
+    }
+    return output;
 }
 
 IntVector argmax_rows(const Matrix& logits) {
@@ -54,36 +43,17 @@ double accuracy(const IntVector& predictions, const IntVector& labels) {
 
 InferenceResult run_plaintext_inference(const Dataset& dataset) {
     InferenceResult result;
-    Matrix ax;
-    Matrix hidden_linear;
-    Matrix hidden;
-    Matrix ah;
-
-    {
-        ScopedTimer timer(result.timings, "A_hat * X");
-        ax = sparse_dense_mul(dataset.graph, dataset.features);
+    Matrix H = dataset.features;
+    for (int layer = 0; layer < 2; ++layer) {
+        if (layer == 0) {
+            H = sparse_dense_mul(dataset.graph, H * dataset.w1);
+            H = relu(H);
+        } else {
+            H = sparse_dense_mul(dataset.graph, H * dataset.w2);
+            H = softmax(H);
+        }
     }
-    {
-        ScopedTimer timer(result.timings, "(A_hat * X) * W1");
-        hidden_linear = ax * dataset.w1;
-    }
-    {
-        ScopedTimer timer(result.timings, "ReLU");
-        hidden = relu(hidden_linear);
-    }
-    {
-        ScopedTimer timer(result.timings, "A_hat * H");
-        ah = sparse_dense_mul(dataset.graph, hidden);
-    }
-    {
-        ScopedTimer timer(result.timings, "(A_hat * H) * W2");
-        result.logits = ah * dataset.w2;
-    }
-    {
-        ScopedTimer timer(result.timings, "argmax + accuracy");
-        result.predictions = argmax_rows(result.logits);
-        result.accuracy = accuracy(result.predictions, dataset.labels);
-    }
+    result.logits = H;
     return result;
 }
 

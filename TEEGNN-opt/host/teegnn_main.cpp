@@ -20,25 +20,6 @@ namespace {
 
 struct InferencePhaseResult {
     teegnn::Matrix logits;
-    double layer1_restore_error = 0.0;
-    double layer1_dense_error = 0.0;
-    double layer2_restore_error = 0.0;
-};
-
-class ScopedTimer {
-public:
-    ScopedTimer(std::vector<teegnn::TimerRecord>& records, std::string name)
-        : records_(records), name_(std::move(name)), start_(std::chrono::steady_clock::now()) {}
-
-    ~ScopedTimer() {
-        const auto end = std::chrono::steady_clock::now();
-        records_.push_back({name_, std::chrono::duration<double, std::milli>(end - start_).count()});
-    }
-
-private:
-    std::vector<teegnn::TimerRecord>& records_;
-    std::string name_;
-    std::chrono::steady_clock::time_point start_;
 };
 
 teegnn::Matrix ree_masked_sparse_dense(
@@ -95,10 +76,7 @@ teegnn::Options parse_args(int argc, char** argv) {
 }
 
 InferencePhaseResult run_secure_inference(teegnn::MaskedData& masked_data,
-                                          const std::unique_ptr<teegnn::TEEGNNClient> &secure,
-                                          std::vector<teegnn::TimerRecord>& timings) {
-    ScopedTimer timer(timings, "teegnn_inference_phase");
-
+                                          const std::unique_ptr<teegnn::TEEGNNClient> &secure) {
     InferencePhaseResult result;
 
     size_t num_nodes = masked_data.graph_shares.a1.size();
@@ -137,38 +115,41 @@ int main(int argc, char** argv) {
 
         teegnn::Dataset dataset;
         {
-            ScopedTimer timer(timings, "load_dataset");
+            teegnn::ScopedTimer timer(timings, "load_dataset");
             dataset = teegnn::load_dataset(options.dataset_dir);
         }
 
         teegnn::InferenceResult plaintext;
         {
-            ScopedTimer timer(timings, "plaintext_reference");
+            teegnn::ScopedTimer timer(timings, "plaintext_inference");
             plaintext = teegnn::run_plaintext_inference(dataset);
         }
 
-        teegnn::MaskPhaseResult masks = teegnn::run_mask_phase(dataset, options);
-
-        std::unique_ptr<teegnn::TEEGNNClient> secure = std::make_unique<teegnn::TEEGNNClient>();
-        if (!secure->initialize()) {
-            throw std::runtime_error("Failed to initialize TEE client");
-        }
-        if (!secure->init_GNNContext(dataset.graph.num_nodes(), options.mask_rank, 
-                                     masks.matrices.feature_dim, masks.matrices.hidden_dim,
-                                     masks.data.weights[0], masks.matrices.precompute_Ahat_u)) {
-            throw std::runtime_error("Failed to initialize GNN context in TEE");
-        }
-
-        const InferencePhaseResult inference =
-            run_secure_inference(masks.data, secure, timings);
-
-        teegnn::IntVector predictions;
-        double teegnn_accuracy = 0.0;
+        teegnn::MaskPhaseResult masks;
         {
-            ScopedTimer timer(timings, "teegnn_argmax_accuracy");
-            predictions = teegnn::argmax_rows(inference.logits);
-            teegnn_accuracy = teegnn::accuracy(predictions, dataset.labels);
+            teegnn::ScopedTimer timer(timings, "mask_phase");
+            masks = teegnn::run_mask_phase(dataset, options);
         }
+
+        InferencePhaseResult inference;
+        {
+            teegnn::ScopedTimer timer(timings, "teegnn_inference");
+            std::unique_ptr<teegnn::TEEGNNClient> secure = std::make_unique<teegnn::TEEGNNClient>();
+            if (!secure->initialize()) {
+                throw std::runtime_error("Failed to initialize TEE client");
+            }
+            if (!secure->init_GNNContext(dataset.graph.num_nodes(), options.mask_rank, 
+                                         masks.matrices.feature_dim, masks.matrices.hidden_dim,
+                                         masks.data.weights[0], masks.matrices.precompute_Ahat_u)) {
+                throw std::runtime_error("Failed to initialize GNN context in TEE");
+            }
+            inference = run_secure_inference(masks.data, secure);
+        }
+        
+        plaintext.predictions = teegnn::argmax_rows(plaintext.logits);
+        plaintext.accuracy = teegnn::accuracy(plaintext.predictions, dataset.labels);
+        teegnn::IntVector predictions = teegnn::argmax_rows(inference.logits);
+        double teegnn_accuracy = teegnn::accuracy(predictions, dataset.labels);
 
         std::vector<int> mismatches;
         for (std::size_t i = 0; i < predictions.size(); ++i) {
@@ -183,6 +164,8 @@ int main(int argc, char** argv) {
         const auto total_end = std::chrono::steady_clock::now();
         const double total_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
 
+        double error = (inference.logits - plaintext.logits).norm();
+
         std::cout << std::fixed << std::setprecision(10);
         std::cout << "nodes: " << dataset.graph.num_nodes() << "\n";
         std::cout << "directed_edges_without_self: " << dataset.graph.raw_directed_edges() << "\n";
@@ -193,11 +176,7 @@ int main(int argc, char** argv) {
         std::cout << "class_count: " << dataset.w2.cols() << "\n";
         std::cout << "plaintext_accuracy: " << plaintext.accuracy << "\n";
         std::cout << "teegnn_accuracy: " << teegnn_accuracy << "\n";
-        // std::cout << "logits_max_abs_error: " << max_abs_error << "\n";
-        // std::cout << "logits_mean_abs_error: " << mean_abs_error << "\n";
-        // std::cout << "debug_layer1_restore_max_abs_error: " << inference.layer1_restore_error << "\n";
-        // std::cout << "debug_layer1_dense_max_abs_error: " << inference.layer1_dense_error << "\n";
-        // std::cout << "debug_layer2_restore_max_abs_error: " << inference.layer2_restore_error << "\n";
+        std::cout << "logits_error: " << error << "\n";
         
         if (mismatches.empty()) {
             std::cout << "comparison: PASS\n";

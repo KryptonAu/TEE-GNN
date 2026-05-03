@@ -24,11 +24,6 @@ public:
     const std::vector<int>& inverse_permutation() const { return inverse_permutation_; }
     const std::vector<double>& scale() const { return scale_; }
 
-    Matrix apply_left(const Matrix& x) const;
-    Matrix apply_left_inv(const Matrix& x) const;
-    Matrix apply_right(const Matrix& x) const;
-    Matrix apply_right_inv(const Matrix& x) const;
-
 private:
     std::vector<int> permutation_;
     std::vector<int> inverse_permutation_;
@@ -38,16 +33,6 @@ private:
 Matrix apply_SPM(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x);
 
 Matrix apply_SPM_inv(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x);
-
-struct LowRankMask {
-    Matrix u;
-    Matrix v;
-
-    Matrix materialize() const;
-    Matrix ahat_times_mask(const Graph& graph) const;
-};
-
-LowRankMask make_low_rank_mask(int rows, int cols, int rank, RandomEngine& rng);
 
 class SDIMMask {
 public:
@@ -96,32 +81,20 @@ ProtectedGraphShares protect_graph_edges(const Graph& graph,
                                          const ScaledPermutation& p5,
                                          RandomEngine& rng);
 
-struct MaskedFeature {
-    teegnn::Matrix share1;
-    teegnn::Matrix share2;
-};
-
 struct MaskMatrices {
     int node_count = 0;
     int feature_dim = 0;
     int hidden_dim = 0;
 
-    teegnn::ScaledPermutation p1;
-    teegnn::ScaledPermutation p2;
-    teegnn::ScaledPermutation p3;
-    teegnn::ScaledPermutation p4;
-    teegnn::ScaledPermutation p5;
-    teegnn::ScaledPermutation p6;
-
-    std::vector<teegnn::LowRankMask> lr_masks;
-    std::vector<teegnn::Matrix> precompute_Ahat_u;
-    std::vector<teegnn::SDIMMask> sdim_masks;
+    std::vector<ScaledPermutation> spm_n;
+    std::vector<Matrix> precompute_Ahat_u;
+    std::vector<SDIMMask> sdim_masks;
 };
 
 struct MaskedData {
-    teegnn::ProtectedGraphShares graph_shares;
-    MaskedFeature features;
-    std::vector<teegnn::Matrix> weights;
+    ProtectedGraphShares graph_shares;
+    Matrix features;
+    std::vector<Matrix> weights;
 };
 
 struct MaskPhaseResult {
@@ -129,14 +102,6 @@ struct MaskPhaseResult {
     MaskedData data;
 };
 
-MaskedFeature feature_mask(const teegnn::Matrix& x,
-                           const teegnn::LowRankMask& low_rank_mask,
-                           const teegnn::ScaledPermutation& left1,
-                           const teegnn::ScaledPermutation& right1,
-                           const teegnn::ScaledPermutation& left2,
-                           const teegnn::ScaledPermutation& right2);
-
-teegnn::MaskPhaseResult run_mask_phase(const teegnn::Dataset& dataset,
-                                       const Options& options);
+MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options);
 
 }  // namespace teegnn

@@ -20,9 +20,8 @@ public:
                          int feature_dim, int hidden_dim, 
                          Matrix& w1, const std::vector<Matrix>& lmm_u);
     
-    bool remask(uint32_t layer_idx, Matrix& y1, Matrix& y2);
-
-    bool nonlinear_layer(uint32_t layer_idx, Matrix& y1, Matrix& y2);
+    // message passing and activation function
+    bool secure_compute(uint32_t layer_idx, Matrix& y1, Matrix& y2);
 
     bool get_debug_info(IntVector& debug_info);
     

@@ -1,11 +1,10 @@
 #pragma once
 
 #include "csprng_adapter.hpp"
-#include "graph.hpp"
+#include "blocked_csc.hpp"
 #include "types.hpp"
 #include "dataset_loader.hpp"
 
-#include <utility>
 #include <vector>
 
 namespace teegnn {
@@ -29,10 +28,6 @@ private:
     std::vector<int> inverse_permutation_;
     std::vector<double> scale_;
 };
-
-Matrix apply_SPM(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x);
-
-Matrix apply_SPM_inv(const ScaledPermutation& L, const ScaledPermutation& R, const Matrix& x);
 
 class SDIMMask {
 public:
@@ -67,32 +62,16 @@ struct Options {
     std::uint64_t seed = 1;
 };
 
-struct ProtectedGraphShares {
-    std::vector<std::vector<std::pair<int, double>>> a1;
-    std::vector<std::vector<std::pair<int, double>>> a2;
-    std::size_t confusion_edges = 0;
-};
-
-ProtectedGraphShares protect_graph_edges(const Graph& graph,
-                                         double confusion_rate,
-                                         const ScaledPermutation& p1,
-                                         const ScaledPermutation& p2,
-                                         const ScaledPermutation& p4,
-                                         const ScaledPermutation& p5,
-                                         RandomEngine& rng);
-
 struct MaskMatrices {
     int node_count = 0;
     int feature_dim = 0;
     int hidden_dim = 0;
 
-    std::vector<ScaledPermutation> spm_n;
-    std::vector<Matrix> precompute_Ahat_u;
     std::vector<SDIMMask> sdim_masks;
 };
 
 struct MaskedData {
-    ProtectedGraphShares graph_shares;
+    std::vector<EncryptedBlockedCSC> graphs;
     Matrix features;
     std::vector<Matrix> weights;
 };

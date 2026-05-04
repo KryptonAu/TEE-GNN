@@ -1,5 +1,6 @@
 // tee_gcn_client.cpp
 #include "tee_gnn_client.hpp"
+#include "teegnn_ta.h"
 #include <iostream>
 #include <cstring>
 #include <stdexcept>
@@ -95,7 +96,7 @@ bool TEEGNNClient::init_GNNContext(int num_vertices, int rank,
     return checkResult(result, "InitGNNContext");
 }
 
-bool TEEGNNClient::remask(uint32_t layer_idx, Matrix& y1, Matrix& y2) {
+bool TEEGNNClient::secure_compute(uint32_t layer_idx, Matrix& y1, Matrix& y2) {
     if (!initialized_) {
         std::cerr << "TEE client not initialized" << std::endl;
         return false;
@@ -133,50 +134,9 @@ bool TEEGNNClient::remask(uint32_t layer_idx, Matrix& y1, Matrix& y2) {
     
     // 调用TA
     TEEC_Result result = TEEC_InvokeCommand(
-        &session_, TEEGNN_CMD_REMASK, &op, NULL);
+        &session_, TEEGNN_CMD_SECURE_COMPUTE, &op, NULL);
     
     return checkResult(result, "remask");
-}
-
-bool TEEGNNClient::nonlinear_layer(uint32_t layer_idx, Matrix& y1, Matrix& y2) {
-    if (!initialized_) {
-        std::cerr << "TEE client not initialized" << std::endl;
-        return false;
-    }
-    
-    if (y1.rows() != y2.rows() ||
-        y1.cols() != y2.cols()) {
-        std::cerr << "Input matrices have different dimensions" << std::endl;
-        return false;
-    }
-    
-    uint32_t rows = y1.rows();
-    uint32_t cols = y1.cols();
-    
-    // 设置操作
-    TEEC_Operation op;
-    memset(&op, 0, sizeof(op));
-    op.paramTypes = TEEC_PARAM_TYPES(
-        TEEC_MEMREF_TEMP_INOUT,   // masked H1_0
-        TEEC_MEMREF_TEMP_INPUT,   // masked H1_1
-        TEEC_VALUE_INPUT,  // layer_idx and feature_dim
-        TEEC_NONE
-    );
-    
-    op.params[0].tmpref.buffer = (void*)y1.data();
-    op.params[0].tmpref.size = rows * cols * sizeof(double);
-    
-    op.params[1].tmpref.buffer = (void*)y2.data();
-    op.params[1].tmpref.size = rows * cols * sizeof(double);
-    
-    op.params[2].value.a = layer_idx;
-    op.params[2].value.b = cols;  // feature_dim
-    
-    // 调用TA
-    TEEC_Result result = TEEC_InvokeCommand(
-        &session_, TEEGNN_CMD_APPLY_ACTIVATION, &op, NULL);
-    
-    return checkResult(result, "ComputeNonlinearLayer");
 }
 
 bool TEEGNNClient::get_debug_info(IntVector& debug_info) {

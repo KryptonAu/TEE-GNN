@@ -1,6 +1,6 @@
 #pragma once
 
-#include <eigen3/Eigen/Dense>
+#include <Eigen/Dense>
 
 #include <cstdint>
 #include <string>
@@ -9,7 +9,7 @@
 
 namespace teegnn {
 
-using Matrix = Eigen::MatrixXd;
+using Matrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 using Vector = Eigen::VectorXd;
 using IntVector = std::vector<int>;
 

@@ -1,39 +1,60 @@
 #pragma once
 
 #include "types.hpp"
+#include "teegnn_error.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <utility>
 #include <vector>
 
 namespace teegnn {
 
-struct WeightedEdge {
-    int row = 0;
-    int col = 0;
-    double value = 0.0;
-};
-
 class Graph {
 public:
     Graph() = default;
-    Graph(int nodes, std::size_t raw_directed_edges, std::vector<WeightedEdge> edges);
+    Graph(size_t nodes);
 
-    int num_nodes() const { return num_nodes_; }
-    std::size_t raw_directed_edges() const { return raw_directed_edges_; }
-    const std::vector<WeightedEdge>& edges() const { return edges_; }
-    const std::vector<std::vector<std::pair<int, double>>>& adjacency() const { return adjacency_; }
+    size_t num_nodes() const { return num_nodes_; }
+    size_t num_edges() const { return num_edges_; }
+    void add_edge(uint32_t u, uint32_t v);
+    void sqrt();
+    double sqrt_degree(uint32_t u) const { return sqrt_degree_[u];}
+    const std::vector<std::vector<uint32_t>>& row_adj() const { return row_adj_; }
+    const std::vector<std::vector<uint32_t>>& col_adj() const { return col_adj_; }
 
 private:
-    int num_nodes_ = 0;
-    std::size_t raw_directed_edges_ = 0;
-    std::vector<WeightedEdge> edges_;
-    std::vector<std::vector<std::pair<int, double>>> adjacency_;
+    size_t num_nodes_ = 0;
+    size_t num_edges_ = 0;
+    std::vector<std::vector<uint32_t>> row_adj_;
+    std::vector<std::vector<uint32_t>> col_adj_;
+    std::vector<double> sqrt_degree_;
 };
 
-Graph build_normalized_graph(int num_nodes, const std::vector<std::pair<int, int>>& directed_edges);
+Graph build_graph(size_t num_nodes, const std::vector<std::pair<int, int>>& directed_edges);
 Matrix sparse_dense_mul(const Graph& graph, const Matrix& input);
-Matrix sparse_dense_mul_edges(int rows, const std::vector<WeightedEdge>& edges, const Matrix& input);
+
+struct CSCGraph {
+    uint32_t n_nodes;
+    uint32_t nnz;
+    uint32_t *col_ptr;
+    uint32_t *row_idx;
+    double *values;
+};
+
+teegnn_status_t csc_graph_alloc(
+    CSCGraph *g,
+    uint32_t n_nodes,
+    uint32_t nnz
+);
+
+void csc_graph_free(CSCGraph *g);
+
+teegnn_status_t graph_to_csc_graph(
+    const Graph& g, 
+    const std::vector<uint32_t>& col_perm, 
+    CSCGraph* out
+);
 
 }  // namespace teegnn
 

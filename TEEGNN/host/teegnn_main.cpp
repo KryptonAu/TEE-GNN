@@ -1,11 +1,9 @@
 #include "dataset_loader.hpp"
 #include "gcn_ops.hpp"
-#include "masks.hpp"
+#include "util.hpp"
 #include "types.hpp"
-
 #include "tee_gnn_client.hpp"
 
-#include <Eigen/src/Core/Matrix.h>
 #include <chrono>
 #include <cmath>
 #include <exception>

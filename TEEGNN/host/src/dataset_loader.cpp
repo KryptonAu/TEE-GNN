@@ -120,7 +120,7 @@ Dataset load_dataset(const std::string& dataset_dir) {
         throw std::runtime_error("hidden dimension from w1 does not match transposed w2 rows");
     }
 
-    dataset.graph = build_normalized_graph(num_nodes, directed_edges);
+    dataset.graph = build_graph(num_nodes, directed_edges);
     return dataset;
 }
 

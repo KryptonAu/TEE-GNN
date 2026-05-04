@@ -10,10 +10,9 @@
       { 0x9c, 0x5f, 0x6f, 0x7d, 0x31, 0xd2, 0xb8, 0xe1 } }
 
 #define TEEGNN_CMD_INIT_CONTEXT        0
-#define TEEGNN_CMD_REMASK              1
-#define TEEGNN_CMD_APPLY_ACTIVATION    2
-#define TEEGNN_CMD_FINALIZE_RESULT     3
-#define TEEGNN_CMD_GET_DEBUG_INFO      4
+#define TEEGNN_CMD_SECURE_COMPUTE      1
+#define TEEGNN_CMD_FINALIZE_RESULT     2
+#define TEEGNN_CMD_GET_DEBUG_INFO      3
 
 #endif /* TEEGNN_TA_H */
 

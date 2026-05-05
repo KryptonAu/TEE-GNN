@@ -18,24 +18,24 @@ BUILD_DIR := build
 
 CPP_SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 ROOT_CPP_SRCS := teegnn_main.cpp
-C_SRCS := ../src/csprng.c
+C_SRCS := $(wildcard ../src/*.c)
 
 CPP_OBJS := $(patsubst $(SRC_DIR)/%.cpp,$(BUILD_DIR)/%.o,$(CPP_SRCS))
 CPP_OBJS += $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(ROOT_CPP_SRCS))
 C_OBJS := $(patsubst ../src/%.c,$(BUILD_DIR)/%.o,$(C_SRCS))
 OBJS := $(CPP_OBJS) $(C_OBJS)
 
-CXXFLAGS += -Wall -Wextra -O2 -fPIC -std=c++17 -I/usr/local/include/eigen3
+CXXFLAGS += -Wall -Wextra -O2 -fPIC -std=c++17 -I/usr/local/include/eigen3 -I/usr/include/openssl
 CXXFLAGS += -I$(INC_DIR) -I../include
 CFLAGS += -Wall -Wextra -O2 -fPIC -std=c11
-CFLAGS += -I../include
+CFLAGS += -I../include -I/usr/include/openssl
 
 ifdef TEEC_EXPORT
 CXXFLAGS += -I$(TEEC_EXPORT)/include
 LDFLAGS  += -L$(TEEC_EXPORT)/lib
 endif
 
-LDLIBS += -lteec
+LDLIBS += -lteec -lssl -lcrypto
 
 .PHONY: all clean
 

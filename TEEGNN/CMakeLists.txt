@@ -15,13 +15,17 @@ file(GLOB C_FILES "src/*.c")
 file(GLOB CPP_FILES "host/src/*.cpp")
 file(GLOB TEEC_FILES "../third_party/optee_client/libteec/src/*.c")
 
+file(GLOB TA_C_FILES "ta/src/*.c")
+
 add_library(ta
     ${CMAKE_CURRENT_SOURCE_DIR}/ta/teegnn_ta.c
+    ${TA_C_FILES}
 )
 
 target_include_directories(ta
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/ta/include
     PRIVATE
         /home/ka/TEE-GNN/third_party/out/data/link/export-ta_arm64/include
 )

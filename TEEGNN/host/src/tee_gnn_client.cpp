@@ -164,7 +164,7 @@ void TEEGNNClient::cleanup() {
     }
 }
 
-std::vector<uint8_t> secret_pack(const Secrets& secrets) {
+std::vector<uint8_t> TEEGNNClient::secret_pack(const Secrets& secrets) {
     size_t total_size = 0;
     total_size += 2 * sizeof(uint64_t);
     total_size += 2 * TEEGNN_AES128_KEY_LEN * sizeof(uint8_t);

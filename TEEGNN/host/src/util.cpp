@@ -219,6 +219,7 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
             key1.size(), 
             &enc1
         );
+        secrets.key1 = key1;
         masked_data.graphs.push_back(*enc1);
 
         s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
@@ -236,6 +237,7 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
             key2.size(), 
             &enc2
         );
+        secrets.key2 = key2;
         masked_data.graphs.push_back(*enc2);
     }
 

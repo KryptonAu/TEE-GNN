@@ -5,11 +5,9 @@
 #include <limits>
 
 namespace {
-
-bool mul_overflows_size_t(size_t a, size_t b) {
-    return b != 0 && a > std::numeric_limits<size_t>::max() / b;
-}
-
+    bool mul_overflows_size_t(size_t a, size_t b) {
+        return b != 0 && a > std::numeric_limits<size_t>::max() / b;
+    }
 }
 
 teegnn_status_t csc_graph_alloc(

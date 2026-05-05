@@ -37,7 +37,6 @@ target_include_directories(teegnn
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/host/include
-    PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/optee_client/libteec/include
 )
 

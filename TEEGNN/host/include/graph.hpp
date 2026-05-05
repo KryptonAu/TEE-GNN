@@ -2,6 +2,7 @@
 
 #include "types.hpp"
 #include "teegnn_error.h"
+#include "csc_graph.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -33,22 +34,6 @@ private:
 
 Graph build_graph(size_t num_nodes, const std::vector<std::pair<int, int>>& directed_edges);
 Matrix sparse_dense_mul(const Graph& graph, const Matrix& input);
-
-struct CSCGraph {
-    uint32_t n_nodes;
-    uint32_t nnz;
-    uint32_t *col_ptr;
-    uint32_t *row_idx;
-    double *values;
-};
-
-teegnn_status_t csc_graph_alloc(
-    CSCGraph *g,
-    uint32_t n_nodes,
-    uint32_t nnz
-);
-
-void csc_graph_free(CSCGraph *g);
 
 teegnn_status_t graph_to_csc_graph(
     const Graph& g, 

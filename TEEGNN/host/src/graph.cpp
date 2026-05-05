@@ -60,66 +60,6 @@ Matrix sparse_dense_mul(const Graph& graph, const Matrix& input) {
     return output;
 }
 
-bool mul_overflows_size_t(size_t a, size_t b) {
-    return b != 0 && a > std::numeric_limits<size_t>::max() / b;
-}
-
-teegnn_status_t csc_graph_alloc(
-    CSCGraph *g,
-    uint32_t n_nodes,
-    uint32_t nnz
-) {
-    if (g == nullptr) {
-        return TEEGNN_ERR_INVALID_ARG;
-    }
-
-    CSCGraph tmp{};
-    tmp.n_nodes = n_nodes;
-    tmp.nnz = nnz;
-
-    const size_t col_len = static_cast<size_t>(n_nodes) + 1U;
-    if (mul_overflows_size_t(col_len, sizeof(uint32_t))) {
-        return TEEGNN_ERR_ALLOC;
-    }
-    tmp.col_ptr = static_cast<uint32_t*>(std::calloc(col_len, sizeof(uint32_t)));
-    if (tmp.col_ptr == nullptr) {
-        return TEEGNN_ERR_ALLOC;
-    }
-
-    if (nnz > 0) {
-        if (mul_overflows_size_t(nnz, sizeof(uint32_t)) ||
-            mul_overflows_size_t(nnz, sizeof(double))) {
-            std::free(tmp.col_ptr);
-            return TEEGNN_ERR_ALLOC;
-        }
-        tmp.row_idx = static_cast<uint32_t*>(std::calloc(nnz, sizeof(uint32_t)));
-        tmp.values = static_cast<double*>(std::calloc(nnz, sizeof(double)));
-        if (tmp.row_idx == nullptr || tmp.values == nullptr) {
-            std::free(tmp.col_ptr);
-            std::free(tmp.row_idx);
-            std::free(tmp.values);
-            return TEEGNN_ERR_ALLOC;
-        }
-    }
-
-    *g = tmp;
-    return TEEGNN_OK;
-}
-
-void csc_graph_free(CSCGraph *g) {
-    if (g == nullptr) {
-        return;
-    }
-    std::free(g->col_ptr);
-    std::free(g->row_idx);
-    std::free(g->values);
-    g->n_nodes = 0;
-    g->nnz = 0;
-    g->col_ptr = nullptr;
-    g->row_idx = nullptr;
-    g->values = nullptr;
-}
-
 teegnn_status_t graph_to_csc_graph(
     const Graph& g, 
     const std::vector<uint32_t>& col_perm, 
@@ -143,7 +83,7 @@ teegnn_status_t graph_to_csc_graph(
         uint32_t n_col = col_perm[col];
         for (const auto& v : g.col_adj()[n_col]) {
             tmp.row_idx[pos] = v;
-            tmp.values[pos] = 1;
+            tmp.values[pos] = 1.0 / g.sqrt_degree(n_col) / g.sqrt_degree(v);
             ++pos;
         }
         tmp.col_ptr[col + 1] = pos;

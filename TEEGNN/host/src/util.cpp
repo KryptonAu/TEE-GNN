@@ -1,8 +1,11 @@
 #include "util.hpp"
+#include "blocked_csc.h"
+#include "csc_graph.h"
 #include "graph.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 
 namespace teegnn {
@@ -18,14 +21,22 @@ std::uint64_t edge_key(int row, int col, int n) {
     return static_cast<std::uint64_t>(row) * static_cast<std::uint64_t>(n) + static_cast<std::uint64_t>(col);
 }
 
+// in real system, this shoule be replaced by real key
+std::array<uint8_t, TEEGNN_AES128_KEY_LEN> test_key() {
+    std::array<uint8_t, TEEGNN_AES128_KEY_LEN> key{};
+    for (size_t i = 0; i < key.size(); ++i) {
+        key[i] = static_cast<uint8_t>(i * 17U + 3U);
+    }
+    return key;
+}
+
 }  // namespace
 
-ScaledPermutation::ScaledPermutation(std::vector<int> permutation, std::vector<double> scale)
+ScaledPermutation::ScaledPermutation(std::vector<uint32_t> permutation, std::vector<double> scale)
     : permutation_(std::move(permutation)), scale_(std::move(scale)) {
     if (permutation_.size() != scale_.size()) {
         throw std::runtime_error("scaled permutation size mismatch");
     }
-    inverse_permutation_.assign(permutation_.size(), 0);
     std::vector<int> seen(permutation_.size(), 0);
     for (int i = 0; i < dim(); ++i) {
         const int mapped = permutation_[static_cast<std::size_t>(i)];
@@ -36,24 +47,21 @@ ScaledPermutation::ScaledPermutation(std::vector<int> permutation, std::vector<d
             throw std::runtime_error("scaled permutation contains zero scale");
         }
         seen[static_cast<std::size_t>(mapped)] = 1;
-        inverse_permutation_[static_cast<std::size_t>(mapped)] = i;
     }
 }
 
 ScaledPermutation::ScaledPermutation(ScaledPermutation&& other)
     : permutation_(std::move(other.permutation_)),
-      inverse_permutation_(std::move(other.inverse_permutation_)),
       scale_(std::move(other.scale_)) {}
 
 ScaledPermutation& ScaledPermutation::operator=(ScaledPermutation&& other) {
     permutation_ = std::move(other.permutation_);
-    inverse_permutation_ = std::move(other.inverse_permutation_);
     scale_ = std::move(other.scale_);
     return *this;
 }
 
 ScaledPermutation ScaledPermutation::random(int dim, RandomEngine& rng) {
-    std::vector<int> permutation(static_cast<std::size_t>(dim));
+    std::vector<uint32_t> permutation(static_cast<std::size_t>(dim));
     std::vector<double> scale(static_cast<std::size_t>(dim));
     for (int i = 0; i < dim; ++i) {
         permutation[static_cast<std::size_t>(i)] = i;
@@ -176,31 +184,67 @@ Matrix apply_SDIM_inv(const SDIMMask& L, const SDIMMask& R, const Matrix& x) {
 }
 
 MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
-    RandomEngine rng_sdim(options.seed, 2, "teegnn-sdim");                       
+    RandomEngine rng_data(options.seed_data, 0, "teegnn-data-owner");
+    RandomEngine rng_model(options.seed_model, 0, "teegnn-model-owner");                       
     
     MaskPhaseResult result;
-    MaskMatrices& matrices = result.matrices;
+    Secrets& secrets = result.secrets;
     MaskedData& masked_data = result.data;
 
-    matrices.node_count = dataset.graph.num_nodes();
-    matrices.feature_dim = static_cast<int>(dataset.features.cols());
-    matrices.hidden_dim = static_cast<int>(dataset.w1.cols());
-    const int class_dim = static_cast<int>(dataset.w2.cols());
-    
+    masked_data.num_nodes = dataset.graph.num_nodes();
+    masked_data.feature_dim = static_cast<int>(dataset.features.cols());
+    masked_data.hidden_dim = static_cast<int>(dataset.w1.cols());
+    masked_data.class_dim = static_cast<int>(dataset.w2.cols());
+    uint32_t block_size = masked_data.num_nodes / 64u *64;
+
+    // data owner
     {
-        SDIMMask s_right = SDIMMask::random(matrices.feature_dim, rng_sdim);
-        SDIMMask s_left = SDIMMask::random(matrices.node_count, rng_sdim);
+        SDIMMask s_right = SDIMMask::random(masked_data.feature_dim, rng_data);
+        SDIMMask s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
         masked_data.features = apply_SDIM(s_left, s_right, dataset.features);
-        matrices.sdim_masks.push_back(std::move(s_left));
-        matrices.sdim_masks.push_back(std::move(s_right));
+        CSCGraph* g1 = new CSCGraph;
+        CSCGraph* g2 = new CSCGraph;
+
+        graph_to_csc_graph(dataset.graph, s_left.permutation(), g1);
+        EncryptedBlockedCSC* enc1 = new EncryptedBlockedCSC;
+        const auto key1 = test_key();
+        blocked_csc_encrypt(
+            g1, 
+            0, 
+            0, 
+            0, 
+            0, 
+            block_size, 
+            key1.data(), 
+            key1.size(), 
+            &enc1
+        );
+        masked_data.graphs.push_back(*enc1);
+
+        s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
+        graph_to_csc_graph(dataset.graph, s_left.permutation(), g2);
+        EncryptedBlockedCSC* enc2 = new EncryptedBlockedCSC;
+        const auto key2 = test_key();
+        blocked_csc_encrypt(
+            g2, 
+            0, 
+            0, 
+            1, 
+            1, 
+            block_size, 
+            key2.data(), 
+            key2.size(), 
+            &enc2
+        );
+        masked_data.graphs.push_back(*enc2);
     }
-    masked_data.weights.push_back(dataset.w1);
+
+    // model owner
     {
-        SDIMMask s_left = SDIMMask::random(matrices.hidden_dim, rng_sdim);
-        SDIMMask s_right = SDIMMask::random(class_dim, rng_sdim);
+        masked_data.weights.push_back(dataset.w1);
+        SDIMMask s_left = SDIMMask::random(masked_data.hidden_dim, rng_model);
+        SDIMMask s_right = SDIMMask::random(masked_data.class_dim, rng_model);
         masked_data.weights.push_back(apply_SDIM(s_left, s_right, dataset.w2));
-        matrices.sdim_masks.push_back(std::move(s_left));
-        matrices.sdim_masks.push_back(std::move(s_right));
     }
 
     return result;

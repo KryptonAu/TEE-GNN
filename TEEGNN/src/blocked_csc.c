@@ -1,11 +1,9 @@
+#include "blocked_csc.h"
+
 #include <limits.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include "blocked_csc.hpp"
-
-namespace teegnn {
 
 #define TEEGNN_COL_PTR_BLOCK_ID UINT64_MAX
 #define TEEGNN_BLOCK_AAD_LEN (8U * sizeof(uint32_t) + sizeof(uint64_t))
@@ -487,7 +485,10 @@ teegnn_status_t blocked_csc_encrypt(
     }
     *out = NULL;
 
-    teegnn_status_t st;
+    teegnn_status_t st = csc_graph_validate(A);
+    if (st != TEEGNN_OK) {
+        return st;
+    }
 
     BlockedCSCHeader header;
     memset(&header, 0, sizeof(header));
@@ -714,6 +715,12 @@ teegnn_status_t blocked_csc_decrypt_full(
         free(payload);
     }
 
+    st = csc_graph_validate(&tmp_graph);
+    if (st != TEEGNN_OK) {
+        csc_graph_free(&tmp_graph);
+        return st;
+    }
+
     *out = tmp_graph;
     return TEEGNN_OK;
 }
@@ -723,5 +730,3 @@ void encrypted_blocked_csc_free(
 ) {
     free(enc);
 }
-
-}  // namespace teegnn

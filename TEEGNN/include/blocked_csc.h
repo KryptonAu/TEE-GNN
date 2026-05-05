@@ -1,15 +1,18 @@
-#pragma once
+#ifndef TEEGNN_BLOCKED_CSC_H
+#define TEEGNN_BLOCKED_CSC_H
 
-#include <cstddef>
-#include <cstdint>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "crypto.h"
+#include "csc_graph.h"
 #include "teegnn_error.h"
-#include "graph.hpp"
 
-namespace teegnn {
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-struct BlockedCSCHeader {
+typedef struct {
     uint32_t graph_id;
     uint32_t graph_version;
     uint32_t layer_id;
@@ -18,30 +21,30 @@ struct BlockedCSCHeader {
     uint32_t nnz;
     uint32_t block_size;
     uint32_t num_blocks;
-};
+} BlockedCSCHeader;
 
-struct EncryptedBlobMeta {
+typedef struct {
     uint64_t ciphertext_offset;
     uint64_t ciphertext_len;
     uint8_t nonce[TEEGNN_GCM_NONCE_LEN];
     uint8_t tag[TEEGNN_GCM_TAG_LEN];
-};
+} EncryptedBlobMeta;
 
-struct EncryptedBlobView {
+typedef struct {
     const uint8_t *nonce;
     const uint8_t *tag;
     uint64_t ciphertext_len;
     const uint8_t *ciphertext;
-};
+} EncryptedBlobView;
 
-struct EncryptedBlobMutableView {
+typedef struct {
     uint8_t *nonce;
     uint8_t *tag;
     uint64_t ciphertext_len;
     uint8_t *ciphertext;
-};
+} EncryptedBlobMutableView;
 
-struct EncryptedBlockedCSC {
+typedef struct {
     BlockedCSCHeader header;
     uint32_t blob_count;
     uint32_t reserved;
@@ -49,7 +52,7 @@ struct EncryptedBlockedCSC {
     uint64_t data_offset;
     uint64_t total_size;
     uint8_t data[1];
-};
+} EncryptedBlockedCSC;
 
 #define TEEGNN_BLOB_INDEX_COL_PTR 0U
 #define TEEGNN_BLOB_INDEX_ROW_BLOCK(block_id) ((uint32_t)((block_id) + 1U))
@@ -103,5 +106,8 @@ teegnn_status_t derive_nonce_simple(
     uint8_t nonce[TEEGNN_GCM_NONCE_LEN]
 );
 
-}  // namespace teegnn
+#ifdef __cplusplus
+}
+#endif
 
+#endif

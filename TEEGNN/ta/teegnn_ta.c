@@ -5,11 +5,16 @@
 #include <stdlib.h>
 
 #include "teegnn_ta.h"
+#include "blocked_csc.h"
 #include "csprng_adapter_c.h"
+#include "scan.h"
+#include "tee_api_defines.h"
 
 #include <tee_internal_api.h>
 #include <tee_internal_api_extensions.h>
 #include <tee_ta_api.h> 
+
+#define INDEX(i, j) (i * cols + j)
 
 /* 矩阵结构体，用于TEE内部表示 */
 typedef struct {
@@ -33,20 +38,22 @@ typedef struct SDIM {
     int32_t *h;
 } SDIM;
 
-/* 上下文结构体，存储GNN计算状态 */
 typedef struct {
     /* 随机流 */
-    teegnn_random_engine_t rng_spm;
-    teegnn_random_engine_t rng_lmm;
-    teegnn_random_engine_t rng_sdim;
+    teegnn_random_engine_t rng_data;
+    teegnn_random_engine_t rng_model;
     teegnn_random_engine_t rng_temp;
     
     /* 参数 */
-    size_t num_vertices;
+    uint8_t **key;
 
     /* 临时缓冲区 */
+    double sum;
+    double factor;
     tee_matrix_t temp_matrix;
-    // temp_SDIM[0].h and temp_SDIM[1].h will be used as temporary buffers
+    double* row_sum;
+    double* col_sum;
+    double* temp_row;
     SDIM temp_SDIM[2];
 
     bool initialized;
@@ -276,85 +283,44 @@ static TEE_Result generate_sdim(teegnn_random_engine_t *engine, size_t n, SDIM *
     return TEE_ERROR_BAD_STATE;
 }
 
-// matrices are in column-major order.
+// matrices are in row-major order.
 static TEE_Result sdim_mask(double *in, double *out, SDIM *L, SDIM *R) {
-    size_t r = L->n;
-    size_t c = R->n;
+    size_t rows = L->n;
+    size_t cols = R->n;
     double factor = 1.0;
     double sum = 0.0;
-    double* row_sum = TEE_Malloc(r * sizeof(double), 0);
-    double* col_sum = TEE_Malloc(c * sizeof(double), 0);
-    if (row_sum == NULL || col_sum == NULL) {
-        TEE_Free(row_sum);
-        TEE_Free(col_sum);
-        return TEE_ERROR_OUT_OF_MEMORY;
-    }
-    memset(row_sum, 0, r * sizeof(double));
-    memset(col_sum, 0, c * sizeof(double));
 
-    for (size_t j = 0; j < c; ++j) {
-        factor += (double)(R->h[j]) / R->value[j];
-        for (size_t i = 0; i < r; ++i) {
-            row_sum[i] += in[i + R->perm[j] * r] / R->value[j] * R->h[j];
-            col_sum[j] += in[i + j * r];
+    double* row_sum = ctx->row_sum;
+    double* col_sum = ctx->col_sum;
+    if (row_sum == NULL || col_sum == NULL) {
+        return TEE_ERROR_BAD_STATE;
+    }
+
+    for (size_t i = 0; i < rows; ++i) {
+        for (size_t j = 0; j < cols; ++j) {
+            row_sum[i] += in[INDEX(i, R->perm[j])] / R->value[j] * R->h[j];
+            col_sum[j] += in[INDEX(i, j)];
         }
     }
-    for (size_t j = 0; j < c; ++j) {
+    for (size_t j = 0; j < cols; ++j) {
+        factor += (double)(R->h[j]) / R->value[j];
         sum += col_sum[R->perm[j]] * R->h[j] / R->value[j];
     }
-    for (size_t j = 0; j < c; ++j) {
-        size_t n_j = R->perm[j];
-        for (size_t i = 0; i < r; ++i) {
-            size_t n_i = L->perm[i];
-            out[i + j * r] = in[n_i + n_j * r] * L->value[i] / R->value[j] + 
-                             col_sum[n_j] * L->h[i] / R->value[j] -
-                             row_sum[n_i] * L->value[i] / R->value[j] / factor -
-                             sum * L->h[i] / R->value[j] / factor;
+    for (size_t i = 0; i < rows; ++i) {
+        row_sum[i] /= factor;
+    }
+    sum /= factor;
+
+    for (size_t i = 0; i < rows; ++i) {
+        size_t n_i = L->perm[i];
+        for (size_t j = 0; j < cols; ++j) {
+            size_t n_j = R->perm[j];
+            out[INDEX(i, j)] = in[INDEX(n_i, n_j)] / R->value[j] * L->value[i] + 
+                                      col_sum[n_j] / R->value[j] * L->h[i]     -
+                                      row_sum[n_i] / R->value[j] * L->value[i] -
+                                               sum / R->value[j] * L->h[i];
         }
     }
-    TEE_Free(row_sum);
-    TEE_Free(col_sum);
-
-    return TEE_SUCCESS;
-}
-
-static TEE_Result sdim_unmask(double *in, double *out, SDIM *L, SDIM *R) {
-    size_t r = L->n;
-    size_t c = R->n;
-    double factor = 1.0;
-    double sum = 0.0;
-    double* row_sum = TEE_Malloc(r * sizeof(double), 0);
-    double* col_sum = TEE_Malloc(c * sizeof(double), 0);
-    if (row_sum == NULL || col_sum == NULL) {
-        TEE_Free(row_sum);
-        TEE_Free(col_sum);
-        return TEE_ERROR_OUT_OF_MEMORY;
-    }
-    memset(row_sum, 0, r * sizeof(double));
-    memset(col_sum, 0, c * sizeof(double));
-
-    for (size_t j = 0; j < c; ++j) {
-        for (size_t i = 0; i < r; ++i) {
-            row_sum[i] += in[i + j * r] / L->value[i] * R->h[j];
-            col_sum[j] += in[i + j * r] * R->value[j] / L->value[i];
-        }
-    }
-    for (size_t i = 0; i < r; ++i) {
-        factor += (double)(L->h[i]) / L->value[i];
-        sum += row_sum[i];
-    }
-    for (size_t j = 0; j < c; ++j) {
-        int n_j = R->perm[j];
-        for (size_t i = 0; i < r; ++i) {
-            int n_i = L->perm[i];
-            out[n_i + n_j * r] = in[i + j * r] / L->value[i] * R->value[j] + 
-                                 row_sum[i] -
-                                 col_sum[j] / L->value[i] * L->h[i] / factor -
-                                 sum / L->value[i] * L->h[i] / factor;
-        }
-    }
-    TEE_Free(row_sum);
-    TEE_Free(col_sum);
 
     return TEE_SUCCESS;
 }
@@ -388,6 +354,168 @@ static void apply_softmax(tee_matrix_t* mat) {
             mat->data[i + j * mat->rows] /= sum;
         }
     }
+}
+
+static void get_row(const double* Y, uint32_t i, SDIM *L, SDIM *R) {
+    size_t rows = L->n;
+    size_t cols = R->n;
+    for (size_t j = 0; j < cols; ++j) {
+        int n_j = R->perm[j];
+        ctx->temp_row[n_j] = Y[INDEX(i, j)] / L->value[i] * R->value[j] + ctx->row_sum[i] -
+                            ctx->col_sum[j] / L->value[i] * L->h[i]     -
+                                   ctx->sum / L->value[i] * L->h[i];
+    }
+}
+
+teegnn_status_t blocked_csc_stream_scan(
+    const EncryptedBlockedCSC *enc,
+    const uint8_t *key,
+    size_t key_len,
+    const double *Y,
+    uint32_t cols,
+    double *Z
+) {
+    if (enc == NULL) {
+        return TEEGNN_ERR_INVALID_ARG;
+    }
+    teegnn_status_t st = validate_header_for_scan(&enc->header);
+    if (st != TEEGNN_OK) {
+        return st;
+    }
+    if (cols > 0 && enc->header.n_nodes > 0 && (Y == NULL || Z == NULL)) {
+        return TEEGNN_ERR_INVALID_ARG;
+    }
+
+    const size_t total = (size_t)enc->header.n_nodes * (size_t)cols;
+    if (cols != 0 && total / cols != enc->header.n_nodes) {
+        return TEEGNN_ERR_ALLOC;
+    }
+    if (total > 0) {
+        memset(Z, 0, total * sizeof(double));
+    }
+
+    size_t col_payload_len = 0;
+    st = col_ptr_payload_size(enc->header.n_nodes, &col_payload_len);
+    if (st != TEEGNN_OK) {
+        return st;
+    }
+    uint32_t *col_ptr = (uint32_t *)TEE_Malloc(col_payload_len * sizeof(uint32_t), 0);
+    if (col_ptr == NULL) {
+        return TEEGNN_ERR_ALLOC;
+    }
+
+    st = decrypt_blob_for_scan(
+        &enc->header,
+        enc,
+        TEEGNN_BLOB_INDEX_COL_PTR,
+        TEEGNN_COL_PTR_BLOCK_ID,
+        key,
+        key_len,
+        (uint8_t *)col_ptr,
+        col_payload_len
+    );
+    if (st != TEEGNN_OK) {
+        TEE_Free(col_ptr);
+        return st;
+    }
+
+    st = validate_col_ptr(col_ptr, enc->header.n_nodes, enc->header.nnz);
+    if (st != TEEGNN_OK) {
+        TEE_Free(col_ptr);
+        return st;
+    }
+
+    if (enc->header.nnz == 0) {
+        TEE_Free(col_ptr);
+        return TEEGNN_OK;
+    }
+
+    size_t block_payload_len = 0;
+    st = row_block_payload_size(enc->header.block_size, &block_payload_len);
+    if (st != TEEGNN_OK) {
+        TEE_Free(col_ptr);
+        return st;
+    }
+
+    uint32_t current_col = 0;
+    get_row(Y, 0, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
+    for (uint32_t block_id = 0; block_id < enc->header.num_blocks; ++block_id) {
+        uint8_t *payload = (uint8_t *)TEE_Malloc(block_payload_len * sizeof(uint8_t), 0);
+        if (payload == NULL) {
+            TEE_Free(col_ptr);
+            return TEEGNN_ERR_ALLOC;
+        }
+
+        st = decrypt_blob_for_scan(
+            &enc->header,
+            enc,
+            TEEGNN_BLOB_INDEX_ROW_BLOCK(block_id),
+            block_id,
+            key,
+            key_len,
+            payload,
+            block_payload_len
+        );
+        if (st != TEEGNN_OK) {
+            TEE_Free(payload);
+            TEE_Free(col_ptr);
+            return st;
+        }
+
+        const uint8_t *rows = payload;
+        const uint8_t *values = rows + (size_t)enc->header.block_size * sizeof(uint32_t);
+        const uint8_t *valid = values + (size_t)enc->header.block_size * sizeof(double);
+
+        for (uint32_t t = 0; t < enc->header.block_size; ++t) {
+            const uint64_t global_pos = (uint64_t)block_id * enc->header.block_size + t;
+            const uint8_t is_valid = valid[t];
+            if (is_valid > 1U) {
+                TEE_Free(payload);
+                TEE_Free(col_ptr);
+                return TEEGNN_ERR_FORMAT;
+            }
+            if (global_pos >= enc->header.nnz) {
+                if (is_valid != 0U) {
+                    TEE_Free(payload);
+                    TEE_Free(col_ptr);
+                    return TEEGNN_ERR_FORMAT;
+                }
+                continue;
+            }
+            if (is_valid != 1U) {
+                TEE_Free(payload);
+                TEE_Free(col_ptr);
+                return TEEGNN_ERR_FORMAT;
+            }
+
+            while (current_col + 1U <= enc->header.n_nodes &&
+                   global_pos >= col_ptr[current_col + 1U]) {
+                ++current_col;
+                get_row(Y, current_col, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
+            }
+            if (current_col >= enc->header.n_nodes) {
+                TEE_Free(payload);
+                TEE_Free(col_ptr);
+                return TEEGNN_ERR_FORMAT;
+            }
+
+            const uint32_t row = load_u32_slot(rows, t);
+            if (row >= enc->header.n_nodes) {
+                TEE_Free(payload);
+                TEE_Free(col_ptr);
+                return TEEGNN_ERR_BOUNDS;
+            }
+            const double value = load_double_slot(values, t);
+            for (uint32_t f = 0; f < cols; ++f) {
+                Z[INDEX(row, f)] += value * ctx->temp_row[f];
+            }
+        }
+
+        TEE_Free(payload);
+    }
+
+    TEE_Free(col_ptr);
+    return TEEGNN_OK;
 }
 
 /* TA入口函数 */
@@ -425,10 +553,8 @@ void TA_CloseSessionEntryPoint(void* sess_ctx) {
     
     /* 清理上下文 */
     if (ctx != NULL) {
-        teegnn_random_engine_wipe(&ctx->rng_spm);
-        teegnn_random_engine_wipe(&ctx->rng_sdim);
-        teegnn_random_engine_wipe(&ctx->rng_lmm);
-        teegnn_random_engine_wipe(&ctx->rng_temp);
+        teegnn_random_engine_wipe(&ctx->rng_data);
+        teegnn_random_engine_wipe(&ctx->rng_model);
         free_context_buffers(ctx);
         
         TEE_Free(ctx);
@@ -438,57 +564,73 @@ void TA_CloseSessionEntryPoint(void* sess_ctx) {
     DMSG("GNN Nonlinear session closed");
 }
 
-/* 初始化上下文 */
 static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
     uint32_t exp_param_types = TEE_PARAM_TYPES(
         TEE_PARAM_TYPE_MEMREF_INOUT,  // w1
-        TEE_PARAM_TYPE_MEMREF_INPUT,  // low_rank_mask precompute
-        TEE_PARAM_TYPE_VALUE_INPUT,   // num_vertices, rank
-        TEE_PARAM_TYPE_VALUE_INPUT    // feature_dim, hidden_dim
+        TEE_PARAM_TYPE_MEMREF_INPUT,  // seeds and keys
+        TEE_PARAM_TYPE_VALUE_INPUT,   // feature_dim, hidden_dim
+        TEE_PARAM_TYPE_NONE
     );
-    TEE_Result res;
-    const uint8_t *lmm_buffer;
-    size_t lmm_len;
-    size_t lmm_bytes;
-    size_t expected_bytes;
-    size_t offset = 0;
-    size_t feature_dim;
-    size_t hidden_dim;
-    
     if (param_types != exp_param_types) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
-    
     if (ctx == NULL) {
         return TEE_ERROR_BAD_STATE;
     }
-
     free_context_buffers(ctx);
     ctx->initialized = false;
 
-    char label_spm[] = "teegnn-spm";
-    char label_sdim[] = "teegnn-sdim";
-    uint64_t seed = 114514; 
+    TEE_Result res;
+    size_t feature_dim = params[2].value.a;
+    size_t hidden_dim = params[2].value.b;
 
-    if (teegnn_random_engine_init_with_label(&ctx->rng_spm,  seed, 0, label_spm, strlen(label_spm)) != CSPRNG_OK ||
-        teegnn_random_engine_init_with_label(&ctx->rng_sdim, seed, 2, label_sdim, strlen(label_sdim)) != CSPRNG_OK) {
-        return TEE_ERROR_BAD_STATE;
+    char label_data[] = "teegnn-data-owner";
+    char label_model[] = "teegnn-model-owner";
+    char label_temp[] = "teegnn-temp";
+    uint64_t seed_data = 0; 
+    uint64_t seed_model = 0; 
+
+    // parse parameters(seeds and keys)
+    // format: [seed_data][seed_model][key1][key2]
+    uint8_t* secrets = params[1].memref.buffer;
+    size_t offset = 0;
+
+    seed_data = *((uint64_t*)(secrets + offset));
+    offset += sizeof(uint64_t);
+    seed_model = *((uint64_t*)(secrets + offset));
+    offset += sizeof(uint64_t);
+
+    ctx->key = TEE_Malloc(2 * sizeof(uint8_t*), 0);
+    if (ctx->key == NULL) {
+        return TEE_ERROR_OUT_OF_MEMORY;
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        ctx->key[i] = TEE_Malloc(TEEGNN_AES128_KEY_LEN, 0);
+        if (ctx->key[i] == NULL) {
+            return TEE_ERROR_OUT_OF_MEMORY;
+        }
+        TEE_MemMove(ctx->key[i], secrets + offset,
+               TEEGNN_AES128_KEY_LEN);
+        offset += TEEGNN_AES128_KEY_LEN;
     }
 
-    ctx->num_vertices = params[2].value.a;
-    feature_dim = params[3].value.a;
-    hidden_dim = params[3].value.b;
-    if (ctx->num_vertices == 0) {
-        return TEE_ERROR_BAD_PARAMETERS;
+    // initialize random engine
+    if (teegnn_random_engine_init_with_label(&ctx->rng_data,  seed_data, 0, 
+                                            label_data, strlen(label_data)) != CSPRNG_OK ||
+        teegnn_random_engine_init_with_label(&ctx->rng_model, seed_model, 0, 
+                                            label_model, strlen(label_model)) != CSPRNG_OK ||
+        teegnn_random_engine_init_with_label(&ctx->rng_temp, 1234, 0, 
+                                            label_temp, strlen(label_temp)) != CSPRNG_OK) {
+        return TEE_ERROR_BAD_STATE;
     }
 
     // sdim_mask for w1
     double *w1 = (double*)params[0].memref.buffer;
-    res = generate_sdim(&ctx->rng_temp, hidden_dim, &ctx->temp_SDIM[0]);
+    res = generate_sdim(&ctx->rng_data, hidden_dim, &ctx->temp_SDIM[0]);
     if (res != TEE_SUCCESS) {
         return res;
     }
-    res = generate_sdim(&ctx->rng_sdim, feature_dim, &ctx->temp_SDIM[1]);
+    res = generate_sdim(&ctx->rng_temp, feature_dim, &ctx->temp_SDIM[1]);
     if (res != TEE_SUCCESS) {
         return res;
     }
@@ -498,12 +640,28 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
     if (res != TEE_SUCCESS) {
         return res;
     }
+
+    ctx->row_sum = TEE_Malloc(feature_dim * sizeof(double), 0);
+    ctx->col_sum = TEE_Malloc(hidden_dim * sizeof(double), 0);
+    if (ctx->row_sum == NULL || ctx->col_sum == NULL) {
+        TEE_Free(ctx->row_sum);
+        TEE_Free(ctx->col_sum);
+        return TEE_ERROR_OUT_OF_MEMORY;
+    }
+
+    double* row_sum = ctx->row_sum;
+    double* col_sum = ctx->col_sum;
+    memset(row_sum, 0, feature_dim * sizeof(double));
+    memset(col_sum, 0, hidden_dim * sizeof(double));
     
-    res = sdim_mask(w1, ctx->temp_matrix.data, &ctx->temp_SDIM[1], &ctx->temp_SDIM[0]);
+    res = sdim_mask(w1, ctx->temp_matrix.data, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
     if (res != TEE_SUCCESS) {
         return res;
     }
-    memcpy(w1, ctx->temp_matrix.data, feature_dim * hidden_dim * sizeof(double));
+    TEE_MemMove(w1, ctx->temp_matrix.data, feature_dim * hidden_dim * sizeof(double));
+
+    TEE_Free(row_sum);
+    TEE_Free(col_sum);
 
     ctx->initialized = true;
     
@@ -515,9 +673,119 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     uint32_t exp_param_types = TEE_PARAM_TYPES(
         TEE_PARAM_TYPE_MEMREF_INOUT,    // masked matrix
         TEE_PARAM_TYPE_MEMREF_INPUT,    // Blocked CSC
-        TEE_PARAM_TYPE_VALUE_INPUT,
+        TEE_PARAM_TYPE_VALUE_INPUT,     // num_nodes, feature_dim
         TEE_PARAM_TYPE_NONE
     );
+
+    TEE_Result res;
+    if (param_types != exp_param_types) {
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+    if (!ctx || !ctx->initialized) {
+        return TEE_ERROR_BAD_STATE;
+    }
+
+    // parse parameters
+    double* y = (double*)params[0].memref.buffer;
+    EncryptedBlockedCSC* enc = (EncryptedBlockedCSC *)params[1].memref.buffer;
+    uint32_t buffer_size = params[1].memref.size;
+    uint32_t rows = params[2].value.a;
+    uint32_t cols = params[2].value.b;
+    uint32_t layer = enc->header.layer_id;
+
+    // apply sdim unmask
+    free_matrix(&ctx->temp_matrix);
+    res = init_matrix(&ctx->temp_matrix, rows, cols);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+
+    if (layer == 0) {
+        res = generate_sdim(&ctx->rng_data, rows, &ctx->temp_SDIM[0]);
+        if (res != TEE_SUCCESS) {
+            return res;
+        }
+    }
+    
+    SDIM* L = &ctx->temp_SDIM[0];
+    SDIM* R = &ctx->temp_SDIM[1];
+    ctx->row_sum = TEE_Malloc(rows * sizeof(double), 0);
+    ctx->col_sum = TEE_Malloc(cols * sizeof(double), 0);
+    if (ctx->row_sum == NULL || ctx->col_sum == NULL) {
+        TEE_Free(ctx->row_sum);
+        TEE_Free(ctx->col_sum);
+        return TEE_ERROR_OUT_OF_MEMORY;
+    }
+
+    double* row_sum = ctx->row_sum;
+    double* col_sum = ctx->col_sum;
+    memset(row_sum, 0, rows * sizeof(double));
+    memset(col_sum, 0, cols * sizeof(double));
+    // 1. calculate the row sum and col sum in order
+    ctx->sum = 0;
+    ctx->factor = 0;
+    for (size_t i = 0; i < rows; ++i) {
+        for (size_t j = 0; j < cols; ++j) {
+            row_sum[i] += y[INDEX(i, j)] / L->value[i] * R->h[j];
+            col_sum[j] += y[INDEX(i, j)] / L->value[i] * R->value[j];
+        }
+        ctx->factor += (double)(L->h[i]) / L->value[i];
+        ctx->sum += row_sum[i];
+    }
+    for (size_t j = 0; j < cols; ++j) {
+        col_sum[j] /= ctx->factor;
+    }
+    ctx->sum /= ctx->factor;
+
+    // 2. message passing
+    ctx->temp_row = TEE_Malloc(cols * sizeof(double), 0);
+    if (ctx->temp_row == NULL) {
+        return TEE_ERROR_OUT_OF_MEMORY;
+    }
+    blocked_csc_stream_scan(
+        enc, 
+        ctx->key[layer], 
+        TEEGNN_AES128_KEY_LEN, 
+        y, 
+        cols, 
+        ctx->temp_matrix.data
+    );
+
+    // 3. activation function
+    if (layer == 0) {
+        apply_relu(&ctx->temp_matrix);
+    } else if (layer == 1) {
+        apply_softmax(&ctx->temp_matrix);
+    } else {
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+
+    // return masked matrix to REE
+    memset(row_sum, 0, rows * sizeof(double));
+    memset(col_sum, 0, cols * sizeof(double));
+    res = generate_sdim(&ctx->rng_data, rows, &ctx->temp_SDIM[0]);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+    res = generate_sdim(&ctx->rng_model, cols, &ctx->temp_SDIM[1]);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+    if (layer == 0) {
+        sdim_mask(ctx->temp_matrix.data, y, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
+    } else {
+        TEE_MemMove(y, ctx->temp_matrix.data, rows * cols * sizeof(double));
+    }
+    
+    // prepare right sdim for next layer
+    res = generate_sdim(&ctx->rng_model, cols, &ctx->temp_SDIM[1]);
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
+    
+    TEE_Free(row_sum);
+    TEE_Free(col_sum);
+    free_matrix(&ctx->temp_matrix);
     
     return TEE_SUCCESS;
 }
@@ -555,7 +823,7 @@ static TEE_Result get_debug_info(uint32_t param_types, TEE_Param params[4]) {
     char* buf = params[0].memref.buffer;
     size_t buf_size = params[0].memref.size;
     
-    memcpy(buf, ctx->temp_SDIM[1].h, buf_size);
+    TEE_MemMove(buf, ctx->temp_SDIM[1].h, buf_size);
     
     return TEE_SUCCESS;
 }

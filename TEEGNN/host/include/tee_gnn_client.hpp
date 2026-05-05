@@ -1,11 +1,13 @@
 #pragma once
 
-#include <vector>
+#include <cstdint>
 #include <string>
+#include <vector>
 #include <tee_client_api.h>
 
 #include "types.hpp"
-#include "teegnn_ta.h"
+#include "blocked_csc.h"
+#include "util.hpp"
 
 namespace teegnn {
 
@@ -16,12 +18,10 @@ public:
     
     bool initialize();
     
-    bool init_GNNContext(int num_vertices, int rank, 
-                         int feature_dim, int hidden_dim, 
-                         Matrix& w1, const std::vector<Matrix>& lmm_u);
+    bool init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t feature_dim, uint32_t hidden_dim);
     
     // message passing and activation function
-    bool secure_compute(uint32_t layer_idx, Matrix& y1, Matrix& y2);
+    bool secure_compute(const EncryptedBlockedCSC* csc, Matrix& y);
 
     bool get_debug_info(IntVector& debug_info);
     
@@ -31,7 +31,8 @@ private:
     TEEC_Context context_;
     TEEC_Session session_;
     bool initialized_;
-     
+    
+    std::vector<uint8_t> secret_pack(const Secrets& secrets);
     bool checkResult(TEEC_Result result, const std::string& operation);
 };
 

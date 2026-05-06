@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace teegnn {
@@ -74,7 +75,7 @@ struct MaskedData {
     size_t feature_dim;
     size_t hidden_dim;
     size_t class_dim;
-    std::vector<EncryptedBlockedCSC> graphs;
+    std::vector<std::unique_ptr<EncryptedBlockedCSC>> graphs;
     Matrix features;
     std::vector<Matrix> weights;
 };

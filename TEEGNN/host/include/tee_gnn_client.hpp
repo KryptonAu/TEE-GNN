@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include <tee_client_api.h>
@@ -21,7 +22,7 @@ public:
     bool init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t feature_dim, uint32_t hidden_dim);
     
     // message passing and activation function
-    bool secure_compute(const EncryptedBlockedCSC* csc, Matrix& y);
+    bool secure_compute(const EncryptedBlockedCSC *csc, Matrix& y);
 
     bool get_debug_info(IntVector& debug_info);
     

@@ -16,11 +16,10 @@
 
 #define INDEX(i, j) (i * cols + j)
 
-/* 矩阵结构体，用于TEE内部表示 */
 typedef struct {
     uint32_t rows;
     uint32_t cols;
-    double* data;  // 按列主序存储
+    double* data;  // row-major
 } tee_matrix_t;
 
 // Scaled Permutation Matrix
@@ -352,25 +351,27 @@ static void apply_relu(tee_matrix_t* mat) {
 }
 
 static void apply_softmax(tee_matrix_t* mat) {
-    for (size_t i = 0; i < mat->rows; i++) {
+    size_t rows = mat->rows;
+    size_t cols = mat->cols;
+    for (size_t i = 0; i < rows; i++) {
         // 找最大值（数值稳定）
         double max_val = mat->data[i];
-        for (size_t j = 1; j < mat->cols; j++) {
-            double val = mat->data[i + j * mat->rows];
+        for (size_t j = 1; j < cols; j++) {
+            double val = mat->data[INDEX(i, j)];
             if (val > max_val) max_val = val;
         }
         
         // 计算exp和sum
         double sum = 0;
-        for (size_t j = 0; j < mat->cols; j++) {
-            double val = mat->data[i + j * mat->rows];
-            mat->data[i + j * mat->rows] = Exp(val - max_val);
-            sum += mat->data[i + j * mat->rows];
+        for (size_t j = 0; j < cols; j++) {
+            double val = mat->data[INDEX(i, j)];
+            mat->data[INDEX(i, j)] = Exp(val - max_val);
+            sum += mat->data[INDEX(i, j)];
         }
         
         // 归一化
-        for (size_t j = 0; j < mat->cols; j++) {
-            mat->data[i + j * mat->rows] /= sum;
+        for (size_t j = 0; j < cols; j++) {
+            mat->data[INDEX(i, j)] /= sum;
         }
     }
 }
@@ -386,7 +387,7 @@ static void get_row(const double* Y, uint32_t i, SDIM *L, SDIM *R) {
     }
 }
 
-teegnn_status_t blocked_csc_stream_scan(
+static TEE_Result blocked_csc_stream_scan(
     const EncryptedBlockedCSC *enc,
     const uint8_t *key,
     size_t key_len,
@@ -395,19 +396,19 @@ teegnn_status_t blocked_csc_stream_scan(
     double *Z
 ) {
     if (enc == NULL) {
-        return TEEGNN_ERR_INVALID_ARG;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
     teegnn_status_t st = validate_header_for_scan(&enc->header);
     if (st != TEEGNN_OK) {
-        return st;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
     if (cols > 0 && enc->header.n_nodes > 0 && (Y == NULL || Z == NULL)) {
-        return TEEGNN_ERR_INVALID_ARG;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
 
     const size_t total = (size_t)enc->header.n_nodes * (size_t)cols;
     if (cols != 0 && total / cols != enc->header.n_nodes) {
-        return TEEGNN_ERR_ALLOC;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
     if (total > 0) {
         memset(Z, 0, total * sizeof(double));
@@ -416,11 +417,11 @@ teegnn_status_t blocked_csc_stream_scan(
     size_t col_payload_len = 0;
     st = col_ptr_payload_size(enc->header.n_nodes, &col_payload_len);
     if (st != TEEGNN_OK) {
-        return st;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
     uint32_t *col_ptr = (uint32_t *)TEE_Malloc(col_payload_len * sizeof(uint32_t), 0);
     if (col_ptr == NULL) {
-        return TEEGNN_ERR_ALLOC;
+        return TEE_ERROR_OUT_OF_MEMORY;
     }
 
     st = decrypt_blob_for_scan(
@@ -435,25 +436,25 @@ teegnn_status_t blocked_csc_stream_scan(
     );
     if (st != TEEGNN_OK) {
         TEE_Free(col_ptr);
-        return st;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
 
     st = validate_col_ptr(col_ptr, enc->header.n_nodes, enc->header.nnz);
     if (st != TEEGNN_OK) {
         TEE_Free(col_ptr);
-        return st;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
 
     if (enc->header.nnz == 0) {
         TEE_Free(col_ptr);
-        return TEEGNN_OK;
+        return TEE_SUCCESS;
     }
 
     size_t block_payload_len = 0;
     st = row_block_payload_size(enc->header.block_size, &block_payload_len);
     if (st != TEEGNN_OK) {
         TEE_Free(col_ptr);
-        return st;
+        return TEE_ERROR_BAD_PARAMETERS;
     }
 
     uint32_t current_col = 0;
@@ -462,7 +463,7 @@ teegnn_status_t blocked_csc_stream_scan(
         uint8_t *payload = (uint8_t *)TEE_Malloc(block_payload_len * sizeof(uint8_t), 0);
         if (payload == NULL) {
             TEE_Free(col_ptr);
-            return TEEGNN_ERR_ALLOC;
+            return TEE_ERROR_OUT_OF_MEMORY;
         }
 
         st = decrypt_blob_for_scan(
@@ -478,7 +479,7 @@ teegnn_status_t blocked_csc_stream_scan(
         if (st != TEEGNN_OK) {
             TEE_Free(payload);
             TEE_Free(col_ptr);
-            return st;
+            return TEE_ERROR_BAD_PARAMETERS;
         }
 
         const uint8_t *rows = payload;
@@ -491,20 +492,20 @@ teegnn_status_t blocked_csc_stream_scan(
             if (is_valid > 1U) {
                 TEE_Free(payload);
                 TEE_Free(col_ptr);
-                return TEEGNN_ERR_FORMAT;
+                return TEE_ERROR_BAD_FORMAT;
             }
             if (global_pos >= enc->header.nnz) {
                 if (is_valid != 0U) {
                     TEE_Free(payload);
                     TEE_Free(col_ptr);
-                    return TEEGNN_ERR_FORMAT;
+                    return TEE_ERROR_BAD_FORMAT;
                 }
                 continue;
             }
             if (is_valid != 1U) {
                 TEE_Free(payload);
                 TEE_Free(col_ptr);
-                return TEEGNN_ERR_FORMAT;
+                return TEE_ERROR_BAD_FORMAT;
             }
 
             while (current_col + 1U <= enc->header.n_nodes &&
@@ -515,14 +516,14 @@ teegnn_status_t blocked_csc_stream_scan(
             if (current_col >= enc->header.n_nodes) {
                 TEE_Free(payload);
                 TEE_Free(col_ptr);
-                return TEEGNN_ERR_FORMAT;
+                return TEE_ERROR_BAD_FORMAT;
             }
 
             const uint32_t row = load_u32_slot(rows, t);
             if (row >= enc->header.n_nodes) {
                 TEE_Free(payload);
                 TEE_Free(col_ptr);
-                return TEEGNN_ERR_BOUNDS;
+                return TEE_ERROR_BAD_PARAMETERS;
             }
             const double value = load_double_slot(values, t);
             for (uint32_t f = 0; f < cols; ++f) {
@@ -763,7 +764,7 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     if (ctx->temp_row == NULL) {
         return TEE_ERROR_OUT_OF_MEMORY;
     }
-    blocked_csc_stream_scan(
+    res = blocked_csc_stream_scan(
         enc, 
         ctx->key[layer], 
         TEEGNN_AES128_KEY_LEN, 

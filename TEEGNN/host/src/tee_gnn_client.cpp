@@ -73,7 +73,7 @@ bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t 
     return checkResult(result, "InitGNNContext");
 }
 
-bool TEEGNNClient::secure_compute(const EncryptedBlockedCSC* csc, Matrix& y) {
+bool TEEGNNClient::secure_compute(const EncryptedBlockedCSC *csc, Matrix& y) {
     if (!initialized_) {
         std::cerr << "TEE client not initialized" << std::endl;
         return false;

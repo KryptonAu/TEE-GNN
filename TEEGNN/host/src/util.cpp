@@ -2,10 +2,12 @@
 #include "blocked_csc.h"
 #include "csc_graph.h"
 #include "graph.hpp"
+#include "teegnn_error.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 
 namespace teegnn {
@@ -190,12 +192,15 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
     MaskPhaseResult result;
     Secrets& secrets = result.secrets;
     MaskedData& masked_data = result.data;
+    teegnn_status_t st;
 
+    secrets.seed_data = options.seed_data;
+    secrets.seed_model = options.seed_model;
     masked_data.num_nodes = dataset.graph.num_nodes();
     masked_data.feature_dim = static_cast<int>(dataset.features.cols());
     masked_data.hidden_dim = static_cast<int>(dataset.w1.cols());
     masked_data.class_dim = static_cast<int>(dataset.w2.cols());
-    uint32_t block_size = masked_data.num_nodes / 64u *64;
+    uint32_t block_size = (masked_data.num_nodes + 63u) / 64u *64;
 
     // data owner
     {
@@ -208,7 +213,7 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
         graph_to_csc_graph(dataset.graph, s_left.permutation(), g1);
         EncryptedBlockedCSC* enc1 = new EncryptedBlockedCSC;
         const auto key1 = test_key();
-        blocked_csc_encrypt(
+        st = blocked_csc_encrypt(
             g1, 
             0, 
             0, 
@@ -219,14 +224,17 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
             key1.size(), 
             &enc1
         );
+        if (st != TEEGNN_OK) {
+            throw std::runtime_error("Failed to encrypt csc");
+        }
         secrets.key1 = key1;
-        masked_data.graphs.push_back(*enc1);
+        masked_data.graphs.push_back(std::unique_ptr<EncryptedBlockedCSC>(enc1));
 
         s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
         graph_to_csc_graph(dataset.graph, s_left.permutation(), g2);
         EncryptedBlockedCSC* enc2 = new EncryptedBlockedCSC;
         const auto key2 = test_key();
-        blocked_csc_encrypt(
+        st = blocked_csc_encrypt(
             g2, 
             0, 
             0, 
@@ -237,8 +245,14 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
             key2.size(), 
             &enc2
         );
+        if (st != TEEGNN_OK) {
+            throw std::runtime_error("Failed to encrypt csc");
+        }
         secrets.key2 = key2;
-        masked_data.graphs.push_back(*enc2);
+        masked_data.graphs.push_back(std::unique_ptr<EncryptedBlockedCSC>(enc2));
+
+        free(g1);
+        free(g2);
     }
 
     // model owner

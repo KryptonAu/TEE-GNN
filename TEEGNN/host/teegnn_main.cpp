@@ -54,7 +54,7 @@ InferencePhaseResult run_secure_inference(teegnn::MaskedData& masked_data,
     y = masked_data.features;
     for (int layer = 0; layer < 2; ++layer) {
         y *= masked_data.weights[layer];
-        secure->secure_compute(&masked_data.graphs[layer], y);
+        secure->secure_compute(masked_data.graphs[layer].get(), y);
     }
     return result;
 }

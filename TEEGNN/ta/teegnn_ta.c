@@ -38,15 +38,12 @@ typedef struct SDIM {
 } SDIM;
 
 typedef struct {
-    /* 随机流 */
     teegnn_random_engine_t rng_data;
     teegnn_random_engine_t rng_model;
     teegnn_random_engine_t rng_temp;
     
-    /* 参数 */
     uint8_t **key;
 
-    /* 临时缓冲区 */
     double sum;
     double factor;
     tee_matrix_t temp_matrix;
@@ -58,10 +55,8 @@ typedef struct {
     bool initialized;
 } gnn_context_t;
 
-/* 全局上下文指针 */
 static gnn_context_t* ctx = NULL;
 
-/* 内部辅助函数 */
 static double Exp(double x) {
     if (x <= 1e-15 && x >= -(1e-15)) return 1.0;
     
@@ -117,7 +112,7 @@ static TEE_Result init_matrix(tee_matrix_t* mat, uint32_t rows, uint32_t cols) {
     }
     bytes = total * sizeof(double);
 
-    mat->data = TEE_Malloc(bytes, 0);
+    mat->data = TEE_Malloc(bytes, TEE_MALLOC_FILL_ZERO);
     if (mat->data == NULL) {
         mat->rows = 0;
         mat->cols = 0;
@@ -354,14 +349,12 @@ static void apply_softmax(tee_matrix_t* mat) {
     size_t rows = mat->rows;
     size_t cols = mat->cols;
     for (size_t i = 0; i < rows; i++) {
-        // 找最大值（数值稳定）
-        double max_val = mat->data[i];
+        double max_val = mat->data[INDEX(i, 0)];
         for (size_t j = 1; j < cols; j++) {
             double val = mat->data[INDEX(i, j)];
             if (val > max_val) max_val = val;
         }
         
-        // 计算exp和sum
         double sum = 0;
         for (size_t j = 0; j < cols; j++) {
             double val = mat->data[INDEX(i, j)];
@@ -369,13 +362,13 @@ static void apply_softmax(tee_matrix_t* mat) {
             sum += mat->data[INDEX(i, j)];
         }
         
-        // 归一化
         for (size_t j = 0; j < cols; j++) {
             mat->data[INDEX(i, j)] /= sum;
         }
     }
 }
 
+// stream scan for unmasked Y
 static void get_row(const double* Y, uint32_t i, SDIM *L, SDIM *R) {
     size_t rows = L->n;
     size_t cols = R->n;
@@ -411,7 +404,7 @@ static TEE_Result blocked_csc_stream_scan(
         return TEE_ERROR_BAD_PARAMETERS;
     }
     if (total > 0) {
-        memset(Z, 0, total * sizeof(double));
+        TEE_MemFill(Z, 0, total * sizeof(double));
     }
 
     size_t col_payload_len = 0;
@@ -538,7 +531,6 @@ static TEE_Result blocked_csc_stream_scan(
     return TEEGNN_OK;
 }
 
-/* TA入口函数 */
 TEE_Result TA_CreateEntryPoint(void) {
     // DMSG("GNN Nonlinear TA created");
     printf("GNN Nonlinear TA created\n");
@@ -555,13 +547,12 @@ TEE_Result TA_OpenSessionEntryPoint(uint32_t param_types,
     (void)param_types;
     (void)params;
     
-    /* 分配上下文 */
     ctx = TEE_Malloc(sizeof(gnn_context_t), 0);
     if (ctx == NULL) {
         return TEE_ERROR_OUT_OF_MEMORY;
     }
     
-    memset(ctx, 0, sizeof(gnn_context_t));
+    TEE_MemFill(ctx, 0, sizeof(gnn_context_t));
     *sess_ctx = (void*)ctx;
     
     DMSG("GNN Nonlinear session opened");
@@ -570,8 +561,7 @@ TEE_Result TA_OpenSessionEntryPoint(uint32_t param_types,
 
 void TA_CloseSessionEntryPoint(void* sess_ctx) {
     (void)sess_ctx;
-    
-    /* 清理上下文 */
+
     if (ctx != NULL) {
         teegnn_random_engine_wipe(&ctx->rng_data);
         teegnn_random_engine_wipe(&ctx->rng_model);
@@ -671,8 +661,8 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
 
     double* row_sum = ctx->row_sum;
     double* col_sum = ctx->col_sum;
-    memset(row_sum, 0, feature_dim * sizeof(double));
-    memset(col_sum, 0, hidden_dim * sizeof(double));
+    TEE_MemFill(row_sum, 0, feature_dim * sizeof(double));
+    TEE_MemFill(col_sum, 0, hidden_dim * sizeof(double));
     
     res = sdim_mask(w1, ctx->temp_matrix.data, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
     if (res != TEE_SUCCESS) {
@@ -682,8 +672,8 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
 
     TEE_Free(row_sum);
     TEE_Free(col_sum);
-    row_sum = NULL;
-    col_sum = NULL;
+    ctx->row_sum = NULL;
+    ctx->col_sum = NULL;
 
     ctx->initialized = true;
     
@@ -727,6 +717,11 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
         if (res != TEE_SUCCESS) {
             return res;
         }
+    } else {
+        res = generate_sdim(&ctx->rng_model, cols, &ctx->temp_SDIM[1]);
+        if (res != TEE_SUCCESS) {
+            return res;
+        }
     }
     
     SDIM* L = &ctx->temp_SDIM[0];
@@ -741,11 +736,11 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
 
     double* row_sum = ctx->row_sum;
     double* col_sum = ctx->col_sum;
-    memset(row_sum, 0, rows * sizeof(double));
-    memset(col_sum, 0, cols * sizeof(double));
+    TEE_MemFill(row_sum, 0, rows * sizeof(double));
+    TEE_MemFill(col_sum, 0, cols * sizeof(double));
     // 1. calculate the row sum and col sum in order
     ctx->sum = 0;
-    ctx->factor = 0;
+    ctx->factor = 1.0;
     for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
             row_sum[i] += y[INDEX(i, j)] / L->value[i] * R->h[j];
@@ -772,6 +767,9 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
         cols, 
         ctx->temp_matrix.data
     );
+    if (res != TEE_SUCCESS) {
+        return res;
+    }
 
     // 3. activation function
     if (layer == 0) {
@@ -783,8 +781,8 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     }
 
     // return masked matrix to REE
-    memset(row_sum, 0, rows * sizeof(double));
-    memset(col_sum, 0, cols * sizeof(double));
+    TEE_MemFill(row_sum, 0, rows * sizeof(double));
+    TEE_MemFill(col_sum, 0, cols * sizeof(double));
     res = generate_sdim(&ctx->rng_data, rows, &ctx->temp_SDIM[0]);
     if (res != TEE_SUCCESS) {
         return res;
@@ -799,22 +797,15 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
         TEE_MemMove(y, ctx->temp_matrix.data, rows * cols * sizeof(double));
     }
     
-    // prepare right sdim for next layer
-    res = generate_sdim(&ctx->rng_model, cols, &ctx->temp_SDIM[1]);
-    if (res != TEE_SUCCESS) {
-        return res;
-    }
-    
     TEE_Free(row_sum);
     TEE_Free(col_sum);
-    row_sum = NULL;
-    col_sum = NULL;
+    ctx->row_sum = NULL;
+    ctx->col_sum = NULL;
     free_matrix(&ctx->temp_matrix);
     
     return TEE_SUCCESS;
 }
 
-/* 清理上下文 */
 static TEE_Result cleanup_context(uint32_t param_types, TEE_Param params[4]) {
     (void)param_types;
     (void)params;
@@ -827,7 +818,6 @@ static TEE_Result cleanup_context(uint32_t param_types, TEE_Param params[4]) {
     return TEE_SUCCESS;
 }
 
-/* 获取调试信息 */
 static TEE_Result get_debug_info(uint32_t param_types, TEE_Param params[4]) {
     uint32_t exp_param_types = TEE_PARAM_TYPES(
         TEE_PARAM_TYPE_MEMREF_OUTPUT,
@@ -852,7 +842,6 @@ static TEE_Result get_debug_info(uint32_t param_types, TEE_Param params[4]) {
     return TEE_SUCCESS;
 }
 
-/* 命令分发 */
 TEE_Result TA_InvokeCommandEntryPoint(void* sess_ctx, uint32_t cmd_id,
                                       uint32_t param_types, TEE_Param params[4]) {
     (void)sess_ctx;

@@ -5,7 +5,6 @@
 #include <limits.h>
 
 #include <tee_internal_api.h>
-#include <tee_internal_api_extensions.h>
 
 #ifndef SIZE_MAX
 #define SIZE_MAX ((size_t)-1)
@@ -21,7 +20,8 @@ static int teegnn_add_overflows_size_t(size_t a, size_t b)
     return a > SIZE_MAX - b;
 }
 
-static teegnn_status_t teegnn_array_bytes(size_t count, size_t elem_size, size_t *out)
+static teegnn_status_t teegnn_array_bytes(size_t count, size_t elem_size,
+                                          size_t *out)
 {
     if (out == NULL) {
         return TEEGNN_ERR_INVALID_ARG;
@@ -37,7 +37,8 @@ teegnn_status_t csc_graph_alloc(
     CSCGraph *g,
     uint32_t n_nodes,
     uint32_t nnz
-) {
+)
+{
     CSCGraph tmp;
     size_t col_len = 0;
     size_t col_bytes = 0;
@@ -154,7 +155,8 @@ teegnn_status_t csc_graph_validate(const CSCGraph *g)
 teegnn_status_t csc_graph_clone(
     const CSCGraph *src,
     CSCGraph *dst
-) {
+)
+{
     teegnn_status_t st;
     CSCGraph tmp;
     size_t col_len;
@@ -216,7 +218,8 @@ teegnn_status_t csc_graph_spmm_plain(
     const double *Y,
     uint32_t feat_dim,
     double *Z
-) {
+)
+{
     teegnn_status_t st;
     size_t total;
     size_t total_bytes;
@@ -231,10 +234,11 @@ teegnn_status_t csc_graph_spmm_plain(
         return TEEGNN_ERR_INVALID_ARG;
     }
 
-    total = (size_t)A->n_nodes * (size_t)feat_dim;
-    if (feat_dim != 0U && total / (size_t)feat_dim != (size_t)A->n_nodes) {
+    if (teegnn_mul_overflows_size_t((size_t)A->n_nodes,
+                                    (size_t)feat_dim)) {
         return TEEGNN_ERR_ALLOC;
     }
+    total = (size_t)A->n_nodes * (size_t)feat_dim;
 
     if (total > 0U) {
         st = teegnn_array_bytes(total, sizeof(double), &total_bytes);

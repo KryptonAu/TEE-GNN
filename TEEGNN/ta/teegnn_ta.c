@@ -168,6 +168,25 @@ static void free_context_buffers(gnn_context_t *context) {
         free_sdim(&context->temp_SDIM[i]);
     }
     free_matrix(&context->temp_matrix);
+    if (context->row_sum != NULL) {
+        TEE_Free(context->row_sum);
+        context->row_sum = NULL;
+    }
+    if (context->col_sum != NULL) {
+        TEE_Free(context->col_sum);
+        context->col_sum = NULL;
+    }
+    if (context->temp_row != NULL) {
+        TEE_Free(context->temp_row);
+        context->temp_row = NULL;
+    }
+    if (context->key != NULL) {
+        for (size_t i = 0; i < 2; ++i) {
+            TEE_Free(context->key[i]);
+        }
+        TEE_Free(context->key);
+        context->key = NULL;
+    }
 }
 
 static TEE_Result generate_spm(teegnn_random_engine_t *engine, size_t n, SPM *spm) {
@@ -626,11 +645,11 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
 
     // sdim_mask for w1
     double *w1 = (double*)params[0].memref.buffer;
-    res = generate_sdim(&ctx->rng_data, hidden_dim, &ctx->temp_SDIM[0]);
+    res = generate_sdim(&ctx->rng_data, feature_dim, &ctx->temp_SDIM[0]);
     if (res != TEE_SUCCESS) {
         return res;
     }
-    res = generate_sdim(&ctx->rng_temp, feature_dim, &ctx->temp_SDIM[1]);
+    res = generate_sdim(&ctx->rng_temp, hidden_dim, &ctx->temp_SDIM[1]);
     if (res != TEE_SUCCESS) {
         return res;
     }
@@ -662,6 +681,8 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
 
     TEE_Free(row_sum);
     TEE_Free(col_sum);
+    row_sum = NULL;
+    col_sum = NULL;
 
     ctx->initialized = true;
     
@@ -785,6 +806,8 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     
     TEE_Free(row_sum);
     TEE_Free(col_sum);
+    row_sum = NULL;
+    col_sum = NULL;
     free_matrix(&ctx->temp_matrix);
     
     return TEE_SUCCESS;

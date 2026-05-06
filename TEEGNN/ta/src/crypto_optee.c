@@ -1,9 +1,8 @@
 #include "crypto.h"
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <tee_internal_api.h>
-#include <tee_internal_api_extensions.h>
 
 static uint32_t key_len_to_bits(size_t key_len)
 {
@@ -57,6 +56,10 @@ static teegnn_status_t validate_common_args(
     }
 
     if (input_len > 0 && (input == NULL || output == NULL)) {
+        return TEEGNN_ERR_INVALID_ARG;
+    }
+
+    if (aad_len > UINT32_MAX || input_len > UINT32_MAX) {
         return TEEGNN_ERR_INVALID_ARG;
     }
 
@@ -147,18 +150,14 @@ teegnn_status_t teegnn_aes_gcm_encrypt(
         return st;
     }
 
-    res = TEE_AEInit(
+    TEE_AEInit(
         op,
         nonce,
         TEEGNN_GCM_NONCE_LEN,
-        TEEGNN_GCM_TAG_LEN * 8,   // 注意：单位是 bit
-        aad_len,
-        plaintext_len
+        TEEGNN_GCM_TAG_LEN * 8U,
+        (uint32_t)aad_len,
+        (uint32_t)plaintext_len
     );
-    if (res != TEE_SUCCESS) {
-        st = tee_to_teegnn_status(res);
-        goto out;
-    }
 
     if (aad_len > 0) {
         TEE_AEUpdateAAD(op, aad, aad_len);
@@ -214,6 +213,7 @@ teegnn_status_t teegnn_aes_gcm_decrypt(
     TEE_ObjectHandle key_obj = TEE_HANDLE_NULL;
     size_t out_len = ciphertext_len;
     uint8_t dummy = 0;
+    uint8_t tag_buf[TEEGNN_GCM_TAG_LEN];
 
     st = validate_common_args(
         key, key_len, nonce, aad, aad_len,
@@ -230,22 +230,20 @@ teegnn_status_t teegnn_aes_gcm_decrypt(
         return st;
     }
 
-    res = TEE_AEInit(
+    TEE_AEInit(
         op,
         nonce,
         TEEGNN_GCM_NONCE_LEN,
-        TEEGNN_GCM_TAG_LEN * 8,   // 注意：单位是 bit
-        aad_len,
-        ciphertext_len
+        TEEGNN_GCM_TAG_LEN * 8U,
+        (uint32_t)aad_len,
+        (uint32_t)ciphertext_len
     );
-    if (res != TEE_SUCCESS) {
-        st = tee_to_teegnn_status(res);
-        goto out;
-    }
 
     if (aad_len > 0) {
         TEE_AEUpdateAAD(op, aad, aad_len);
     }
+
+    TEE_MemMove(tag_buf, tag, sizeof(tag_buf));
 
     res = TEE_AEDecryptFinal(
         op,
@@ -253,7 +251,7 @@ teegnn_status_t teegnn_aes_gcm_decrypt(
         ciphertext_len,
         ciphertext_len > 0 ? plaintext : NULL,
         &out_len,
-        (void *)tag,
+        tag_buf,
         TEEGNN_GCM_TAG_LEN
     );
 

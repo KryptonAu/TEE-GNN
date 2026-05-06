@@ -1,29 +1,42 @@
 #include "csprng_adapter_c.h"
 
-#include <string.h>
+#include <tee_internal_api.h>
+
+static size_t teegnn_strlen(const char *s)
+{
+    size_t len = 0U;
+
+    while (s[len] != '\0') {
+        ++len;
+    }
+
+    return len;
+}
 
 static int teegnn_random_init_stream(teegnn_random_engine_t *engine,
                                      uint64_t seed,
                                      uint64_t stream_id,
                                      const void *label,
-                                     size_t label_len) {
+                                     size_t label_len)
+{
     int rc;
 
     if (engine == NULL || (label == NULL && label_len != 0U)) {
         return CSPRNG_ERR_BAD_PARAMS;
     }
 
-    memset(engine, 0, sizeof(*engine));
+    TEE_MemFill(engine, 0, sizeof(*engine));
 
     rc = csprng_master_init(&engine->master, &seed, sizeof(seed));
     if (rc != CSPRNG_OK) {
         return rc;
     }
 
-    rc = csprng_stream_init(&engine->stream, &engine->master, stream_id, label, label_len);
+    rc = csprng_stream_init(&engine->stream, &engine->master, stream_id,
+                            label, label_len);
     if (rc != CSPRNG_OK) {
         csprng_master_wipe(&engine->master);
-        memset(engine, 0, sizeof(*engine));
+        TEE_MemFill(engine, 0, sizeof(*engine));
         return rc;
     }
 
@@ -34,22 +47,26 @@ int teegnn_random_engine_init_with_label(teegnn_random_engine_t *engine,
                                          uint64_t seed,
                                          uint64_t stream_id,
                                          const void *label,
-                                         size_t label_len) {
+                                         size_t label_len)
+{
     return teegnn_random_init_stream(engine, seed, stream_id, label, label_len);
 }
 
 int teegnn_random_engine_init(teegnn_random_engine_t *engine,
                               uint64_t seed,
                               uint64_t stream_id,
-                              const char *label) {
+                              const char *label)
+{
     if (label == NULL) {
         return teegnn_random_init_stream(engine, seed, stream_id, NULL, 0U);
     }
 
-    return teegnn_random_init_stream(engine, seed, stream_id, label, strlen(label));
+    return teegnn_random_init_stream(engine, seed, stream_id, label,
+                                    teegnn_strlen(label));
 }
 
-void teegnn_random_engine_wipe(teegnn_random_engine_t *engine) {
+void teegnn_random_engine_wipe(teegnn_random_engine_t *engine)
+{
     if (engine == NULL) {
         return;
     }
@@ -61,7 +78,8 @@ void teegnn_random_engine_wipe(teegnn_random_engine_t *engine) {
 int teegnn_random_uniform(teegnn_random_engine_t *engine,
                           double a,
                           double b,
-                          double *out) {
+                          double *out)
+{
     if (engine == NULL || out == NULL) {
         return CSPRNG_ERR_BAD_PARAMS;
     }
@@ -72,7 +90,8 @@ int teegnn_random_uniform(teegnn_random_engine_t *engine,
 int teegnn_random_uniform_int(teegnn_random_engine_t *engine,
                               int32_t min_inclusive,
                               int32_t max_exclusive,
-                              int32_t *out) {
+                              int32_t *out)
+{
     uint32_t negative_count;
     uint32_t offset;
     uint32_t span;
@@ -116,7 +135,8 @@ int teegnn_random_uniform_int(teegnn_random_engine_t *engine,
 
 int teegnn_random_uniform_index(teegnn_random_engine_t *engine,
                                 uint32_t n,
-                                uint32_t *out) {
+                                uint32_t *out)
+{
     if (engine == NULL || out == NULL) {
         return CSPRNG_ERR_BAD_PARAMS;
     }
@@ -127,7 +147,8 @@ int teegnn_random_uniform_index(teegnn_random_engine_t *engine,
     return csprng_u32_range(&engine->stream, 0U, n, out);
 }
 
-int teegnn_random_matrix_value(teegnn_random_engine_t *engine, int32_t *out) {
+int teegnn_random_matrix_value(teegnn_random_engine_t *engine, int32_t *out)
+{
     int32_t value;
     int rc;
 
@@ -147,7 +168,8 @@ int teegnn_random_matrix_value(teegnn_random_engine_t *engine, int32_t *out) {
     return CSPRNG_OK;
 }
 
-int teegnn_random_nonzero_scale(teegnn_random_engine_t *engine, int32_t *out) {
+int teegnn_random_nonzero_scale(teegnn_random_engine_t *engine, int32_t *out)
+{
     int32_t value;
     int rc;
 
@@ -173,7 +195,8 @@ int teegnn_random_matrix(teegnn_random_engine_t *engine,
                          int rows,
                          int cols,
                          double *row_major_out,
-                         size_t out_len) {
+                         size_t out_len)
+{
     size_t i;
     size_t total;
     int32_t value;

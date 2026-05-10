@@ -47,7 +47,6 @@ typedef struct {
     double sum;
     double factor;
     tee_matrix_t temp_matrix;
-    double* row_sum;
     double* col_sum;
     double* temp_row;
     SDIM temp_SDIM[2];
@@ -66,19 +65,16 @@ static double Exp(double x) {
         x = -x;
     }
     
-    // 将x分解为整数部分和小数部分: exp(x) = exp(整数)*exp(小数)
     int integer_part = (int)x;
     double fractional_part = x - integer_part;
     
-    // 计算exp(整数部分) - 通过连乘计算
     double exp_integer = 1.0;
-    double e = 2.71828182845904523536;  // 自然常数e
+    double e = 2.71828182845904523536;
     for (int i = integer_part; i; i >>= 1) {
         if (i & 1) exp_integer *= e;
         e *= e;
     }
     
-    // 计算exp(小数部分) - 使用泰勒级数
     double exp_fractional = 1.0;
     double term = 1.0;
     for (int n = 1; n < 30; n++) {
@@ -88,7 +84,6 @@ static double Exp(double x) {
     }
     
     double result = exp_integer * exp_fractional;
-    // 如果是负数输入，返回倒数
     if (is_negative) {
         return 1.0 / result;
     }
@@ -162,10 +157,6 @@ static void free_context_buffers(gnn_context_t *context) {
         free_sdim(&context->temp_SDIM[i]);
     }
     free_matrix(&context->temp_matrix);
-    if (context->row_sum != NULL) {
-        TEE_Free(context->row_sum);
-        context->row_sum = NULL;
-    }
     if (context->col_sum != NULL) {
         TEE_Free(context->col_sum);
         context->col_sum = NULL;
@@ -303,15 +294,14 @@ static TEE_Result sdim_mask(double *in, double *out, SDIM *L, SDIM *R) {
     double factor = 1.0;
     double sum = 0.0;
 
-    double* row_sum = ctx->row_sum;
+    double row_sum = 0.0;
     double* col_sum = ctx->col_sum;
-    if (row_sum == NULL || col_sum == NULL) {
+    if (col_sum == NULL) {
         return TEE_ERROR_BAD_STATE;
     }
 
     for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
-            row_sum[i] += in[INDEX(i, R->perm[j])] / R->value[j] * R->h[j];
             col_sum[j] += in[INDEX(i, j)];
         }
     }
@@ -319,18 +309,20 @@ static TEE_Result sdim_mask(double *in, double *out, SDIM *L, SDIM *R) {
         factor += (double)(R->h[j]) / R->value[j];
         sum += col_sum[R->perm[j]] * R->h[j] / R->value[j];
     }
-    for (size_t i = 0; i < rows; ++i) {
-        row_sum[i] /= factor;
-    }
     sum /= factor;
 
     for (size_t i = 0; i < rows; ++i) {
         size_t n_i = L->perm[i];
+        row_sum = 0.0;
+        for (size_t j = 0; j < cols; ++j) {
+            row_sum += in[INDEX(n_i, R->perm[j])] / R->value[j] * R->h[j];
+        }
+        row_sum /= factor;
         for (size_t j = 0; j < cols; ++j) {
             size_t n_j = R->perm[j];
             out[INDEX(i, j)] = in[INDEX(n_i, n_j)] / R->value[j] * L->value[i] + 
                                       col_sum[n_j] / R->value[j] * L->h[i]     -
-                                      row_sum[n_i] / R->value[j] * L->value[i] -
+                                           row_sum / R->value[j] * L->value[i] -
                                                sum / R->value[j] * L->h[i];
         }
     }
@@ -372,9 +364,13 @@ static void apply_softmax(tee_matrix_t* mat) {
 static void get_row(const double* Y, uint32_t i, SDIM *L, SDIM *R) {
     size_t rows = L->n;
     size_t cols = R->n;
+    double row_sum = 0.0;
+    for (size_t j = 0; j < cols; ++j) {
+        row_sum += Y[INDEX(i, j)] / L->value[i] * R->h[j];
+    }
     for (size_t j = 0; j < cols; ++j) {
         int n_j = R->perm[j];
-        ctx->temp_row[n_j] = Y[INDEX(i, j)] / L->value[i] * R->value[j] + ctx->row_sum[i] -
+        ctx->temp_row[n_j] = Y[INDEX(i, j)] / L->value[i] * R->value[j] + row_sum -
                             ctx->col_sum[j] / L->value[i] * L->h[i]     -
                                    ctx->sum / L->value[i] * L->h[i];
     }
@@ -651,17 +647,13 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
         return res;
     }
 
-    ctx->row_sum = TEE_Malloc(feature_dim * sizeof(double), 0);
     ctx->col_sum = TEE_Malloc(hidden_dim * sizeof(double), 0);
-    if (ctx->row_sum == NULL || ctx->col_sum == NULL) {
-        TEE_Free(ctx->row_sum);
+    if (ctx->col_sum == NULL) {
         TEE_Free(ctx->col_sum);
         return TEE_ERROR_OUT_OF_MEMORY;
     }
 
-    double* row_sum = ctx->row_sum;
     double* col_sum = ctx->col_sum;
-    TEE_MemFill(row_sum, 0, feature_dim * sizeof(double));
     TEE_MemFill(col_sum, 0, hidden_dim * sizeof(double));
     
     res = sdim_mask(w1, ctx->temp_matrix.data, &ctx->temp_SDIM[0], &ctx->temp_SDIM[1]);
@@ -670,9 +662,7 @@ static TEE_Result init_context(uint32_t param_types, TEE_Param params[4]) {
     }
     TEE_MemMove(w1, ctx->temp_matrix.data, feature_dim * hidden_dim * sizeof(double));
 
-    TEE_Free(row_sum);
     TEE_Free(col_sum);
-    ctx->row_sum = NULL;
     ctx->col_sum = NULL;
 
     ctx->initialized = true;
@@ -726,28 +716,23 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     
     SDIM* L = &ctx->temp_SDIM[0];
     SDIM* R = &ctx->temp_SDIM[1];
-    ctx->row_sum = TEE_Malloc(rows * sizeof(double), 0);
     ctx->col_sum = TEE_Malloc(cols * sizeof(double), 0);
-    if (ctx->row_sum == NULL || ctx->col_sum == NULL) {
-        TEE_Free(ctx->row_sum);
-        TEE_Free(ctx->col_sum);
+    if (ctx->col_sum == NULL) {
         return TEE_ERROR_OUT_OF_MEMORY;
     }
 
-    double* row_sum = ctx->row_sum;
+    double row_sum = 0.0;
     double* col_sum = ctx->col_sum;
-    TEE_MemFill(row_sum, 0, rows * sizeof(double));
     TEE_MemFill(col_sum, 0, cols * sizeof(double));
-    // 1. calculate the row sum and col sum in order
+    // 1. calculate the col sum in order
     ctx->sum = 0;
     ctx->factor = 1.0;
     for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
-            row_sum[i] += y[INDEX(i, j)] / L->value[i] * R->h[j];
+            ctx->sum += y[INDEX(i, j)] / L->value[i] * R->h[j];
             col_sum[j] += y[INDEX(i, j)] / L->value[i] * R->value[j];
         }
         ctx->factor += (double)(L->h[i]) / L->value[i];
-        ctx->sum += row_sum[i];
     }
     for (size_t j = 0; j < cols; ++j) {
         col_sum[j] /= ctx->factor;
@@ -781,7 +766,6 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     }
 
     // return masked matrix to REE
-    TEE_MemFill(row_sum, 0, rows * sizeof(double));
     TEE_MemFill(col_sum, 0, cols * sizeof(double));
     res = generate_sdim(&ctx->rng_data, rows, &ctx->temp_SDIM[0]);
     if (res != TEE_SUCCESS) {
@@ -797,9 +781,7 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
         TEE_MemMove(y, ctx->temp_matrix.data, rows * cols * sizeof(double));
     }
     
-    TEE_Free(row_sum);
     TEE_Free(col_sum);
-    ctx->row_sum = NULL;
     ctx->col_sum = NULL;
     free_matrix(&ctx->temp_matrix);
     

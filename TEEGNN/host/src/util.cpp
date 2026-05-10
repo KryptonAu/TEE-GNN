@@ -6,22 +6,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 
 namespace teegnn {
 namespace {
-
-void require_square_dim(int expected, int actual, const char* what) {
-    if (expected != actual) {
-        throw std::runtime_error(std::string(what) + " dimension mismatch");
-    }
-}
-
-std::uint64_t edge_key(int row, int col, int n) {
-    return static_cast<std::uint64_t>(row) * static_cast<std::uint64_t>(n) + static_cast<std::uint64_t>(col);
-}
 
 // in real system, this shoule be replaced by real key
 std::array<uint8_t, TEEGNN_AES128_KEY_LEN> test_key() {
@@ -34,56 +26,14 @@ std::array<uint8_t, TEEGNN_AES128_KEY_LEN> test_key() {
 
 }  // namespace
 
-ScaledPermutation::ScaledPermutation(std::vector<uint32_t> permutation, std::vector<double> scale)
-    : permutation_(std::move(permutation)), scale_(std::move(scale)) {
-    if (permutation_.size() != scale_.size()) {
-        throw std::runtime_error("scaled permutation size mismatch");
-    }
-    std::vector<int> seen(permutation_.size(), 0);
-    for (int i = 0; i < dim(); ++i) {
-        const int mapped = permutation_[static_cast<std::size_t>(i)];
-        if (mapped < 0 || mapped >= dim() || seen[static_cast<std::size_t>(mapped)] != 0) {
-            throw std::runtime_error("invalid permutation");
-        }
-        if (std::abs(scale_[static_cast<std::size_t>(i)]) < 1e-12) {
-            throw std::runtime_error("scaled permutation contains zero scale");
-        }
-        seen[static_cast<std::size_t>(mapped)] = 1;
-    }
-}
-
-ScaledPermutation::ScaledPermutation(ScaledPermutation&& other)
-    : permutation_(std::move(other.permutation_)),
-      scale_(std::move(other.scale_)) {}
-
-ScaledPermutation& ScaledPermutation::operator=(ScaledPermutation&& other) {
-    permutation_ = std::move(other.permutation_);
-    scale_ = std::move(other.scale_);
-    return *this;
-}
-
-ScaledPermutation ScaledPermutation::random(int dim, RandomEngine& rng) {
-    std::vector<uint32_t> permutation(static_cast<std::size_t>(dim));
-    std::vector<double> scale(static_cast<std::size_t>(dim));
-    for (int i = 0; i < dim; ++i) {
-        permutation[static_cast<std::size_t>(i)] = i;
-        scale[static_cast<std::size_t>(i)] = rng.nonzero_scale();
-    }
-    for (int i = dim - 1; i > 0; --i) {
-        const int j = static_cast<int>(rng.uniform_index(static_cast<std::uint64_t>(i + 1)));
-        std::swap(permutation[static_cast<std::size_t>(i)], permutation[static_cast<std::size_t>(j)]);
-    }
-    return ScaledPermutation(std::move(permutation), std::move(scale));
-}
-
-SDIMMask::SDIMMask(ScaledPermutation p, Vector h)
-    : p_(std::move(p)), h_(std::move(h)) {
-    if (h_.size() != p_.dim()) {
+SDIMMask::SDIMMask(std::vector<uint32_t> p, std::vector<int32_t> v, std::vector<int32_t> h) 
+    : p_(std::move(p)), v_(std::move(v)), h_(std::move(h)) {
+    if (h_.size() != p_.size()) {
         throw std::runtime_error("SDIM vector dimension mismatch");
     }
     denominator_ = 1.0;
-    for (int i = 0; i < p_.dim(); ++i) {
-        denominator_ +=  h_(i) / p_.scale()[static_cast<std::size_t>(i)];
+    for (size_t i = 0; i < h_.size(); ++i) {
+        denominator_ +=  static_cast<double>(h_[i]) / v_[i];
     }
     if (std::abs(denominator_) < 1e-8) {
         throw std::runtime_error("singular SDIM mask");
@@ -92,26 +42,37 @@ SDIMMask::SDIMMask(ScaledPermutation p, Vector h)
 
 SDIMMask::SDIMMask(SDIMMask&& other) {
     p_ = std::move(other.p_);
+    v_ = std::move(other.v_);
     h_ = std::move(other.h_);
     denominator_ = other.denominator_;
 }
 
 SDIMMask& SDIMMask::operator=(SDIMMask&& other) {
     p_ = std::move(other.p_);
+    v_ = std::move(other.v_);
     h_ = std::move(other.h_);
     denominator_ = other.denominator_;
     return *this;
 }
 
-SDIMMask SDIMMask::random(int dim, RandomEngine& rng) {
+SDIMMask SDIMMask::random(size_t dim, RandomEngine& rng) {
     for (int attempt = 0; attempt < 32; ++attempt) {
-        ScaledPermutation p = ScaledPermutation::random(dim, rng);
-        Vector h(dim);
-        for (int i = 0; i < dim; ++i) {
-            h(i) = rng.nonzero_scale();
+        std::vector<uint32_t> permutation(dim);
+        std::vector<int32_t> value(dim);
+        std::vector<int32_t> h(dim);
+        for (size_t i = 0; i < dim; ++i) {
+            permutation[i] = i;
+            value[i] = rng.nonzero_scale();
+        }
+        for (size_t i = dim - 1; i > 0; --i) {
+            const uint32_t j = rng.uniform_index(static_cast<uint32_t>(i + 1));
+            std::swap(permutation[i], permutation[j]);
+        }
+        for (size_t i = 0; i < dim; ++i) {
+            h[i] = rng.nonzero_scale();
         }
         try {
-            return SDIMMask(std::move(p), std::move(h));
+            return SDIMMask(std::move(permutation), std::move(value),std::move(h));
         } catch (const std::runtime_error&) {
         }
     }
@@ -119,29 +80,29 @@ SDIMMask SDIMMask::random(int dim, RandomEngine& rng) {
 }
 
 Matrix apply_SDIM(const SDIMMask& L, const SDIMMask& R, const Matrix& x) {
-    int r = L.dim();
-    int c = R.dim();
+    size_t r = L.dim();
+    size_t c = R.dim();
     double sum = 0.0;
     Vector row_sum = Vector::Zero(r);
     Vector col_sum = Vector::Zero(c);
-    for (int j = 0; j < c; ++j) {
-        for (int i = 0; i < r; ++i) {
+    for (size_t j = 0; j < c; ++j) {
+        for (size_t i = 0; i < r; ++i) {
             row_sum(i) += x(i, R.perm(j)) / R.value(j) * R.h(j) ;
             col_sum(j) += x(i, j);
         }
     }
-    for (int i = 0; i < r; ++i) {
+    for (size_t i = 0; i < r; ++i) {
         row_sum(i) /= R.denominator();
     }
-    for (int j = 0; j < c; ++j) {
+    for (size_t j = 0; j < c; ++j) {
         sum += col_sum(R.perm(j)) / R.denominator() / R.value(j) * R.h(j);
     }
 
     Matrix out(x.rows(), x.cols());
-    for (int j = 0; j < c; ++j) {
-        int n_j = R.perm(j);
-        for (int i = 0; i < r; ++i) {
-            int n_i = L.perm(i);
+    for (size_t j = 0; j < c; ++j) {
+        size_t n_j = R.perm(j);
+        for (size_t i = 0; i < r; ++i) {
+            size_t n_i = L.perm(i);
             out(i, j) = x(n_i, n_j) / R.value(j) * L.value(i) + 
                                  col_sum(n_j) / R.value(j) * L.h(i) -
                                  row_sum(n_i) / R.value(j) * L.value(i) -
@@ -153,28 +114,28 @@ Matrix apply_SDIM(const SDIMMask& L, const SDIMMask& R, const Matrix& x) {
 }
 
 Matrix apply_SDIM_inv(const SDIMMask& L, const SDIMMask& R, const Matrix& x) {
-    int r = L.dim();
-    int c = R.dim();
+    size_t r = L.dim();
+    size_t c = R.dim();
     double sum = 0.0;
     Vector row_sum = Vector::Zero(r);
     Vector col_sum = Vector::Zero(c);
-    for (int j = 0; j < c; ++j) {
-        for (int i = 0; i < r; ++i) {
+    for (size_t j = 0; j < c; ++j) {
+        for (size_t i = 0; i < r; ++i) {
             row_sum(i) += x(i, j) / L.value(i) * R.h(j);
             col_sum(j) += x(i, j) / L.value(i) * R.value(j);
         }
         col_sum(j) /= L.denominator();
     }
-    for (int i = 0; i < r; ++i) {
+    for (size_t i = 0; i < r; ++i) {
         sum += row_sum(i) / L.denominator();
     }
     // std::cout<< sum <<' '<< L.denominator() <<'\n';
 
     Matrix out(x.rows(), x.cols());
-    for (int j = 0; j < c; ++j) {
-        int n_j = R.perm(j);
-        for (int i = 0; i < r; ++i) {
-            int n_i = L.perm(i);
+    for (size_t j = 0; j < c; ++j) {
+        size_t n_j = R.perm(j);
+        for (size_t i = 0; i < r; ++i) {
+            size_t n_i = L.perm(i);
             out(n_i, n_j) = x(i, j) / L.value(i) * R.value(j) + 
                                      row_sum(i) -
                                      col_sum(j) / L.value(i) * L.h(i) -

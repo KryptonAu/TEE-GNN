@@ -75,18 +75,6 @@ void teegnn_random_engine_wipe(teegnn_random_engine_t *engine)
     csprng_master_wipe(&engine->master);
 }
 
-int teegnn_random_uniform(teegnn_random_engine_t *engine,
-                          double a,
-                          double b,
-                          double *out)
-{
-    if (engine == NULL || out == NULL) {
-        return CSPRNG_ERR_BAD_PARAMS;
-    }
-
-    return csprng_double_range(&engine->stream, a, b, out);
-}
-
 int teegnn_random_uniform_int(teegnn_random_engine_t *engine,
                               int32_t min_inclusive,
                               int32_t max_exclusive,
@@ -147,27 +135,6 @@ int teegnn_random_uniform_index(teegnn_random_engine_t *engine,
     return csprng_u32_range(&engine->stream, 0U, n, out);
 }
 
-int teegnn_random_matrix_value(teegnn_random_engine_t *engine, int32_t *out)
-{
-    int32_t value;
-    int rc;
-
-    if (out == NULL) {
-        return CSPRNG_ERR_BAD_PARAMS;
-    }
-
-    rc = teegnn_random_uniform_int(engine,
-                                  TEEGNN_RANDOM_MATRIX_MIN,
-                                  TEEGNN_RANDOM_MATRIX_MAX,
-                                  &value);
-    if (rc != CSPRNG_OK) {
-        return rc;
-    }
-
-    *out = value;
-    return CSPRNG_OK;
-}
-
 int teegnn_random_nonzero_scale(teegnn_random_engine_t *engine, int32_t *out)
 {
     int32_t value;
@@ -188,42 +155,5 @@ int teegnn_random_nonzero_scale(teegnn_random_engine_t *engine, int32_t *out)
     } while (value == 0);
 
     *out = value;
-    return CSPRNG_OK;
-}
-
-int teegnn_random_matrix(teegnn_random_engine_t *engine,
-                         int rows,
-                         int cols,
-                         double *row_major_out,
-                         size_t out_len)
-{
-    size_t i;
-    size_t total;
-    int32_t value;
-    int rc;
-
-    if (engine == NULL || row_major_out == NULL) {
-        return CSPRNG_ERR_BAD_PARAMS;
-    }
-    if (rows < 0 || cols < 0) {
-        return CSPRNG_ERR_BAD_PARAMS;
-    }
-
-    total = (size_t)rows * (size_t)cols;
-    if (rows != 0 && total / (size_t)rows != (size_t)cols) {
-        return CSPRNG_ERR_RANGE;
-    }
-    if (out_len < total) {
-        return CSPRNG_ERR_BAD_PARAMS;
-    }
-
-    for (i = 0U; i < total; ++i) {
-        rc = teegnn_random_uniform_int(engine, -256, 255, &value);
-        if (rc != CSPRNG_OK) {
-            return rc;
-        }
-        row_major_out[i] = (double)value;
-    }
-
     return CSPRNG_OK;
 }

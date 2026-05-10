@@ -29,10 +29,6 @@ int teegnn_random_engine_init(teegnn_random_engine_t *engine,
                               const char *label);
 void teegnn_random_engine_wipe(teegnn_random_engine_t *engine);
 
-int teegnn_random_uniform(teegnn_random_engine_t *engine,
-                          double a,
-                          double b,
-                          double *out);
 int teegnn_random_uniform_int(teegnn_random_engine_t *engine,
                               int32_t min_inclusive,
                               int32_t max_exclusive,
@@ -40,13 +36,7 @@ int teegnn_random_uniform_int(teegnn_random_engine_t *engine,
 int teegnn_random_uniform_index(teegnn_random_engine_t *engine,
                                 uint32_t n,
                                 uint32_t *out);
-int teegnn_random_matrix_value(teegnn_random_engine_t *engine, int32_t *out);
 int teegnn_random_nonzero_scale(teegnn_random_engine_t *engine, int32_t *out);
-int teegnn_random_matrix(teegnn_random_engine_t *engine,
-                         int rows,
-                         int cols,
-                         double *row_major_out,
-                         size_t out_len);
 
 #ifdef __cplusplus
 }

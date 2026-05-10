@@ -22,13 +22,6 @@ typedef struct {
     double* data;  // row-major
 } tee_matrix_t;
 
-// Scaled Permutation Matrix
-typedef struct SPM {
-    int n;
-    int32_t *perm;
-    int32_t *value;
-} SPM;
-
 // Subtly Designed Invertible Matrix
 typedef struct SDIM {
     int n;
@@ -127,16 +120,6 @@ static void free_matrix(tee_matrix_t* mat) {
     mat->cols = 0;
 }
 
-static void free_spm(SPM *spm) {
-    if (spm != 0) {
-        TEE_Free(spm->perm);
-        TEE_Free(spm->value);
-        spm->n = 0;
-        spm->perm = NULL;
-        spm->value = NULL;
-    }
-}
-
 static void free_sdim(SDIM *sdim) {
     if (sdim != 0) {
         TEE_Free(sdim->perm);
@@ -174,89 +157,55 @@ static void free_context_buffers(gnn_context_t *context) {
     }
 }
 
-static TEE_Result generate_spm(teegnn_random_engine_t *engine, size_t n, SPM *spm) {
-    int rc;
-
-    if (engine == NULL || spm == NULL || n == 0 || n > (size_t)INT32_MAX) {
-        return TEE_ERROR_BAD_PARAMETERS;
-    }
-
-    free_spm(spm);
-
-    spm->n = (int)n;
-    spm->perm = TEE_Malloc(n * sizeof(int32_t), 0);
-    if (spm->perm == NULL) {
-        return TEE_ERROR_OUT_OF_MEMORY;
-    }
-    
-    spm->value = TEE_Malloc(n * sizeof(int32_t), 0);
-    if (spm->value == NULL) {
-        free_spm(spm);
-        return TEE_ERROR_OUT_OF_MEMORY;
-    }
-
-    for (size_t i = 0; i < n; ++i) {
-        int32_t value;
-
-        spm->perm[i] = i;
-        rc = teegnn_random_nonzero_scale(engine, &value);
-        if (rc != CSPRNG_OK) {
-            free_spm(spm);
-            return TEE_ERROR_BAD_STATE;
-        }
-        spm->value[i] = value;
-    }
-
-    for (size_t i = n - 1; i > 0; --i) {
-        uint32_t j;
-        int32_t tmp;
-
-        rc = teegnn_random_uniform_index(engine, (uint32_t)i + 1U, &j);
-        if (rc != CSPRNG_OK) {
-            free_spm(spm);
-            return TEE_ERROR_BAD_STATE;
-        }
-        tmp = spm->perm[i];
-        spm->perm[i] = spm->perm[j];
-        spm->perm[j] = tmp;
-    }
-
-    return TEE_SUCCESS;
-}
-
 static TEE_Result generate_sdim(teegnn_random_engine_t *engine, size_t n, SDIM *sdim) {
-    SPM spm;
-    int32_t *h;
     int rc;
 
     if (engine == NULL || sdim == NULL || n == 0 || n > (size_t)INT32_MAX) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
-    
-    free_sdim(sdim);
-
-    sdim->n = 0;
-    sdim->perm = NULL;
-    sdim->value = NULL;
-    sdim->h = NULL;
 
     for (size_t attempt = 0; attempt < 32; ++attempt) {
         double denominator = 1.0;
+        free_sdim(sdim);
+        sdim->n = n;
+        sdim->perm = NULL;
+        sdim->value = NULL;
+        sdim->h = NULL;
 
-        spm.n = 0;
-        spm.perm = NULL;
-        spm.value = NULL;
-        h = NULL;
-
-        TEE_Result res = generate_spm(engine, n, &spm);
-        if (res != TEE_SUCCESS) {
-            return res;
+        sdim->perm = TEE_Malloc(n * sizeof(uint32_t), 0);
+        sdim->value = TEE_Malloc(n * sizeof(int32_t), 0);
+        sdim->h = TEE_Malloc(n * sizeof(int32_t), 0);
+        if (sdim->perm == NULL || sdim->value == NULL || sdim->h == NULL) {
+            TEE_Free(sdim->perm);
+            TEE_Free(sdim->value);
+            TEE_Free(sdim->h);
+            return TEE_ERROR_OUT_OF_MEMORY;
         }
 
-        h = TEE_Malloc(n * sizeof(int32_t), 0);
-        if (h == NULL) {
-            free_spm(&spm);
-            return TEE_ERROR_OUT_OF_MEMORY;
+        for (size_t i = 0; i < n; ++i) {
+            int32_t value;
+
+            sdim->perm[i] = i;
+            rc = teegnn_random_nonzero_scale(engine, &value);
+            if (rc != CSPRNG_OK) {
+                free_sdim(sdim);
+                return TEE_ERROR_BAD_STATE;
+            }
+            sdim->value[i] = value;
+        }
+
+        for (size_t i = n - 1; i > 0; --i) {
+            uint32_t j;
+            int32_t tmp;
+
+            rc = teegnn_random_uniform_index(engine, (uint32_t)i + 1U, &j);
+            if (rc != CSPRNG_OK) {
+                free_sdim(sdim);
+                return TEE_ERROR_BAD_STATE;
+            }
+            tmp = sdim->perm[i];
+            sdim->perm[i] = sdim->perm[j];
+            sdim->perm[j] = tmp;
         }
 
         for (size_t i = 0; i < n; ++i) {
@@ -264,24 +213,16 @@ static TEE_Result generate_sdim(teegnn_random_engine_t *engine, size_t n, SDIM *
 
             rc = teegnn_random_nonzero_scale(engine, &value);
             if (rc != CSPRNG_OK) {
-                free_spm(&spm);
-                TEE_Free(h);
+                free_sdim(sdim);
                 return TEE_ERROR_BAD_STATE;
             }
-            h[i] = value;
-            denominator += value / (double)spm.value[i];
+            sdim->h[i] = value;
+            denominator += value / (double)sdim->value[i];
         }
 
         if (denominator <= -1e-8 || denominator >= 1e-8) {
-            sdim->n = n;
-            sdim->perm = spm.perm;
-            sdim->value = spm.value;
-            sdim->h = h;
             return TEE_SUCCESS;
         }
-
-        free_spm(&spm);
-        TEE_Free(h);
     }
 
     return TEE_ERROR_BAD_STATE;
@@ -690,7 +631,6 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     // parse parameters
     double* y = (double*)params[0].memref.buffer;
     EncryptedBlockedCSC* enc = (EncryptedBlockedCSC *)params[1].memref.buffer;
-    uint32_t buffer_size = params[1].memref.size;
     uint32_t rows = params[2].value.a;
     uint32_t cols = params[2].value.b;
     uint32_t layer = enc->header.layer_id;
@@ -721,7 +661,6 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
         return TEE_ERROR_OUT_OF_MEMORY;
     }
 
-    double row_sum = 0.0;
     double* col_sum = ctx->col_sum;
     TEE_MemFill(col_sum, 0, cols * sizeof(double));
     // 1. calculate the col sum in order

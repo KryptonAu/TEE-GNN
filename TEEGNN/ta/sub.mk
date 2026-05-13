@@ -10,3 +10,5 @@ srcs-y += src/csprng_adapter_c.c
 srcs-y += src/scan.c
 srcs-y += ../src/blocked_csc.c
 srcs-y += src/csc_graph.c
+srcs-y += src/edge_list.c
+srcs-y += src/blocked_edge_list.c

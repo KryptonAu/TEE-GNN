@@ -3,7 +3,7 @@
 #include "csprng_adapter.hpp"
 #include "types.hpp"
 #include "dataset_loader.hpp"
-#include "blocked_csc.h"
+#include "blocked_edge_list.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +11,8 @@
 #include <vector>
 
 namespace teegnn {
+
+#define TA_DATA_SIZE (1 << 23) // 8 * 1024 * 1024 Byte
 
 class SDIMMask {
 public:
@@ -51,6 +53,7 @@ struct Secrets {
     uint64_t seed_model = 1;
     std::array<uint8_t, TEEGNN_AES128_KEY_LEN> key1;
     std::array<uint8_t, TEEGNN_AES128_KEY_LEN> key2;
+    uint32_t row_block_size = 1;
 };
 
 struct MaskedData {
@@ -58,7 +61,7 @@ struct MaskedData {
     size_t feature_dim;
     size_t hidden_dim;
     size_t class_dim;
-    std::vector<std::unique_ptr<EncryptedBlockedCSC>> graphs;
+    std::vector<std::unique_ptr<EncryptedBlockedEdgeList>> graphs;
     Matrix features;
     std::vector<Matrix> weights;
 };

@@ -1,6 +1,7 @@
 #include "util.hpp"
-#include "blocked_csc.h"
-#include "csc_graph.h"
+#include "blocked_edge_list.h"
+#include "crypto.h"
+#include "edge_list.h"
 #include "graph.hpp"
 #include "teegnn_error.h"
 
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <stddef.h>
 #include <stdexcept>
 #include <utility>
 
@@ -162,19 +164,62 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
     masked_data.hidden_dim = static_cast<int>(dataset.w1.cols());
     masked_data.class_dim = static_cast<int>(dataset.w2.cols());
     uint32_t block_size = (masked_data.num_nodes + 63u) / 64u *64;
+    uint32_t row_block_size = block_size;
+
+    // calculate the size of edge_list block and row block
+    {
+        uint32_t ta_data_size = TA_DATA_SIZE;
+
+        // sdim
+        ta_data_size -= (masked_data.num_nodes + masked_data.hidden_dim) * sizeof(int32_t) * 3;
+        // col_sum, col_sum_out, temp_row
+        ta_data_size -= masked_data.hidden_dim * 3 * sizeof(double);
+        // keys
+        ta_data_size -= TEEGNN_AES128_KEY_LEN * 3;
+
+        ta_data_size -= 1 << 13; // 8192
+
+        double a = std::sqrt((4 + 4 + 8 + 1) * dataset.graph.num_edges());
+        double b = std::sqrt(masked_data.num_nodes * masked_data.hidden_dim * sizeof(double));
+
+        block_size = static_cast<uint32_t>(ta_data_size / (a + b) * a);
+        row_block_size = static_cast<uint32_t>(ta_data_size / (a + b) * b);
+        block_size = std::min((size_t)block_size, dataset.graph.num_edges());
+        row_block_size = std::min((size_t)row_block_size, masked_data.num_nodes);
+    }
+
+    secrets.row_block_size = row_block_size;
 
     // data owner
     {
+        std::vector<SDIMMask> sdims;
         SDIMMask s_right = SDIMMask::random(masked_data.feature_dim, rng_data);
         SDIMMask s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
         masked_data.features = apply_SDIM(s_left, s_right, dataset.features);
-        CSCGraph* g1 = new CSCGraph;
-        CSCGraph* g2 = new CSCGraph;
+        EdgeList* g1 = new EdgeList;
+        EdgeList* g2 = new EdgeList;
 
-        graph_to_csc_graph(dataset.graph, s_left.permutation(), g1);
-        EncryptedBlockedCSC* enc1 = new EncryptedBlockedCSC;
+        sdims.push_back(std::move(s_left));
+        sdims.push_back(std::move(s_right));
+
+        // layer 1
+        s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
+        sdims.push_back(std::move(s_left));
+
+        // layer 2
+        s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
+        sdims.push_back(std::move(s_left));
+
+        graph_to_edge_list(
+            dataset.graph, 
+            sdims[0].permutation(), 
+            sdims[2].permutation(), 
+            row_block_size, 
+            g1
+        );
+        EncryptedBlockedEdgeList* enc1 = nullptr;
         const auto key1 = test_key();
-        st = blocked_csc_encrypt(
+        st = blocked_edge_list_encrypt(
             g1, 
             0, 
             0, 
@@ -186,16 +231,22 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
             &enc1
         );
         if (st != TEEGNN_OK) {
-            throw std::runtime_error("Failed to encrypt csc");
+            throw std::runtime_error("Failed to encrypt edge_list");
         }
         secrets.key1 = key1;
-        masked_data.graphs.push_back(std::unique_ptr<EncryptedBlockedCSC>(enc1));
+        masked_data.graphs.push_back(std::unique_ptr<EncryptedBlockedEdgeList>(enc1));
 
-        s_left = SDIMMask::random(masked_data.num_nodes, rng_data);
-        graph_to_csc_graph(dataset.graph, s_left.permutation(), g2);
-        EncryptedBlockedCSC* enc2 = new EncryptedBlockedCSC;
+        
+        graph_to_edge_list(
+            dataset.graph, 
+            sdims[2].permutation(), 
+            sdims[3].permutation(), 
+            row_block_size, 
+            g2
+        );
+        EncryptedBlockedEdgeList* enc2 = nullptr;
         const auto key2 = test_key();
-        st = blocked_csc_encrypt(
+        st = blocked_edge_list_encrypt(
             g2, 
             0, 
             0, 
@@ -207,10 +258,10 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
             &enc2
         );
         if (st != TEEGNN_OK) {
-            throw std::runtime_error("Failed to encrypt csc");
+            throw std::runtime_error("Failed to encrypt edge_list");
         }
         secrets.key2 = key2;
-        masked_data.graphs.push_back(std::unique_ptr<EncryptedBlockedCSC>(enc2));
+        masked_data.graphs.push_back(std::unique_ptr<EncryptedBlockedEdgeList>(enc2));
 
         free(g1);
         free(g2);

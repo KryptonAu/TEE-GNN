@@ -73,7 +73,7 @@ bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t 
     return checkResult(result, "InitGNNContext");
 }
 
-bool TEEGNNClient::secure_compute(const EncryptedBlockedCSC *csc, Matrix& y) {
+bool TEEGNNClient::secure_compute(const EncryptedBlockedEdgeList *lst, Matrix& y) {
     if (!initialized_) {
         std::cerr << "TEE client not initialized" << std::endl;
         return false;
@@ -82,15 +82,15 @@ bool TEEGNNClient::secure_compute(const EncryptedBlockedCSC *csc, Matrix& y) {
     TEEC_SharedMemory shm;
     std::memset(&shm, 0, sizeof(shm));
 
-    shm.buffer = (void *)csc;
-    shm.size = csc->total_size;
+    shm.buffer = (void *)lst;
+    shm.size = lst->total_size;
     shm.flags = TEEC_MEM_INPUT;
 
     res = TEEC_RegisterSharedMemory(&context_, &shm);
     if (res != TEEC_SUCCESS) {
         std::cerr << "TEEC_RegisterSharedMemory failed: 0x"
                   << std::hex << res << std::dec << "\n";
-        return res;
+        return false;
     }
 
     TEEC_Operation op;
@@ -98,12 +98,14 @@ bool TEEGNNClient::secure_compute(const EncryptedBlockedCSC *csc, Matrix& y) {
     op.paramTypes = TEEC_PARAM_TYPES(
         TEEC_MEMREF_TEMP_INOUT,
         TEEC_MEMREF_WHOLE, 
-        TEEC_VALUE_INPUT, 
-        TEEC_NONE
+        TEEC_MEMREF_TEMP_INOUT,
+        TEEC_VALUE_INPUT
     );
 
     uint32_t rows = y.rows();
     uint32_t cols = y.cols();
+
+    temp_ciphertext.resize(2 * rows * cols * sizeof(double));
     
     op.params[0].tmpref.buffer = (void*)y.data();
     op.params[0].tmpref.size = rows * cols * sizeof(double);
@@ -112,10 +114,12 @@ bool TEEGNNClient::secure_compute(const EncryptedBlockedCSC *csc, Matrix& y) {
     op.params[1].memref.size = shm.size;
     op.params[1].memref.offset = 0;
 
-    op.params[2].value.a = rows;        // num_nodes
-    op.params[2].value.b = cols;        // feature_dim
+    op.params[2].tmpref.buffer = temp_ciphertext.data();
+    op.params[2].tmpref.size = 2 * rows * cols * sizeof(double);
+
+    op.params[3].value.a = rows;        // num_nodes
+    op.params[3].value.b = cols;        // feature_dim
     
-    // 调用TA
     TEEC_Result result = TEEC_InvokeCommand(
         &session_, TEEGNN_CMD_SECURE_COMPUTE, &op, NULL);
     
@@ -166,11 +170,15 @@ void TEEGNNClient::cleanup() {
 
 std::vector<uint8_t> TEEGNNClient::secret_pack(const Secrets& secrets) {
     size_t total_size = 0;
+    total_size += sizeof(uint32_t);
     total_size += 2 * sizeof(uint64_t);
     total_size += 2 * TEEGNN_AES128_KEY_LEN * sizeof(uint8_t);
     
     std::vector<uint8_t> pack(total_size);
     size_t offset = 0;
+
+    memcpy(pack.data() + offset, &secrets.row_block_size, sizeof(uint32_t));
+    offset += sizeof(uint32_t);
 
     memcpy(pack.data() + offset, &secrets.seed_data, sizeof(uint64_t));
     offset += sizeof(uint64_t);

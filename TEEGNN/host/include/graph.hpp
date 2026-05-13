@@ -1,5 +1,6 @@
 #pragma once
 
+#include "edge_list.h"
 #include "types.hpp"
 #include "teegnn_error.h"
 #include "csc_graph.h"
@@ -39,6 +40,14 @@ teegnn_status_t graph_to_csc_graph(
     const Graph& g, 
     const std::vector<uint32_t>& col_perm, 
     CSCGraph* out
+);
+
+teegnn_status_t graph_to_edge_list(
+    const Graph& g, 
+    const std::vector<uint32_t>& col_perm, 
+    const std::vector<uint32_t>& next_row_perm,
+    size_t row_block_size,
+    EdgeList* out
 );
 
 }  // namespace teegnn

@@ -1,8 +1,11 @@
 #include "graph.hpp"
+#include "edge_list.h"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <vector>
 
 namespace teegnn {
 
@@ -87,6 +90,52 @@ teegnn_status_t graph_to_csc_graph(
             ++pos;
         }
         tmp.col_ptr[col + 1] = pos;
+    }
+
+    *out = tmp;
+    return TEEGNN_OK;
+}
+
+teegnn_status_t graph_to_edge_list(
+    const Graph& g, 
+    const std::vector<uint32_t>& col_perm, 
+    const std::vector<uint32_t>& next_row_perm,
+    size_t row_block_size,
+    EdgeList* out
+) {
+    if (out == nullptr) {
+        return TEEGNN_ERR_INVALID_ARG;
+    }
+
+    teegnn_status_t st;
+
+    EdgeList tmp{};
+    st = edge_list_alloc(&tmp, g.num_nodes(), g.num_edges());
+    if (st != TEEGNN_OK) {
+        return st;
+    }
+
+    std::vector<uint32_t> next_row_perm_inv(next_row_perm.size());
+    for (uint32_t i = 0; i < next_row_perm.size(); ++i) {
+        next_row_perm_inv[next_row_perm[i]] = i;
+    }
+
+    size_t blocks = (g.num_nodes() + row_block_size - 1U) / row_block_size;
+    std::vector<std::vector<Edge>> row_blocks(blocks);
+    for (uint32_t col = 0; col < g.num_nodes(); ++col) {
+        uint32_t n_col = col_perm[col];
+        for (const auto& v : g.col_adj()[n_col]) {
+            uint32_t n_row = next_row_perm_inv[v];
+            double value = 1.0 / g.sqrt_degree(n_col) / g.sqrt_degree(v);
+            row_blocks[n_row / row_block_size].emplace_back(Edge{col, n_row, value});
+        }
+    }
+    uint32_t pos = 0;
+    for (const auto& block : row_blocks) {
+        for (const auto& e : block) {
+            tmp.e_ptr[pos] = e;
+            pos++;
+        }
     }
 
     *out = tmp;

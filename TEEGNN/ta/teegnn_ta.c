@@ -189,9 +189,7 @@ static TEE_Result generate_sdim(teegnn_random_engine_t *engine, size_t n, SDIM *
         sdim->value = TEE_Malloc(n * sizeof(int32_t), 0);
         sdim->h = TEE_Malloc(n * sizeof(int32_t), 0);
         if (sdim->perm == NULL || sdim->value == NULL || sdim->h == NULL) {
-            TEE_Free(sdim->perm);
-            TEE_Free(sdim->value);
-            TEE_Free(sdim->h);
+            free_sdim(sdim);
             return TEE_ERROR_OUT_OF_MEMORY;
         }
 
@@ -237,7 +235,8 @@ static TEE_Result generate_sdim(teegnn_random_engine_t *engine, size_t n, SDIM *
             return TEE_SUCCESS;
         }
     }
-
+    
+    free_sdim(sdim);
     return TEE_ERROR_BAD_STATE;
 }
 
@@ -431,9 +430,10 @@ static TEE_Result blocked_edge_list_stream_scan(
         return TEE_ERROR_BAD_PARAMETERS;
     }
 
-    const size_t rows = ctx->row_block_size;
+    const size_t row_block_size = ctx->row_block_size;
+    const size_t rows = enc->header.n_nodes;
     const size_t cols = Z->cols;
-    const size_t total = rows * cols;
+    const size_t total = row_block_size * cols;
     if (total > 0) {
         TEE_MemFill(Z->data, 0, total * sizeof(double));
     }
@@ -501,7 +501,7 @@ static TEE_Result blocked_edge_list_stream_scan(
 
             const uint32_t dst = load_u32_slot(dsts, t);
             const uint32_t src = load_u32_slot(srcs, t);
-            if (dst / rows > current_row_block) {
+            if (dst / row_block_size > current_row_block) {
                 if (layer_idx == 0) {
                     apply_relu(Z);
                 } else if (layer_idx == 1) {
@@ -510,7 +510,7 @@ static TEE_Result blocked_edge_list_stream_scan(
                     return TEE_ERROR_BAD_PARAMETERS;
                 }
                 // update col_sum_out
-                for (uint32_t i = 0; i < rows; ++i) {
+                for (uint32_t i = 0; i < row_block_size; ++i) {
                     for (uint32_t j = 0; j < cols; ++j) {
                         ctx->col_sum_out[j] += Z->data[INDEX(i, j)];
                     }
@@ -544,7 +544,7 @@ static TEE_Result blocked_edge_list_stream_scan(
 
             const double value = load_double_slot(values, t);
             for (uint32_t f = 0; f < cols; ++f) {
-                Z->data[INDEX(dst % rows, f)] += value * ctx->temp_row[f];
+                Z->data[INDEX(dst % row_block_size, f)] += value * ctx->temp_row[f];
             }
         }
 
@@ -560,7 +560,7 @@ static TEE_Result blocked_edge_list_stream_scan(
         return TEE_ERROR_BAD_PARAMETERS;
     }
     // update col_sum_out
-    for (uint32_t i = 0; i < rows; ++i) {
+    for (uint32_t i = 0; i < row_block_size; ++i) {
         for (uint32_t j = 0; j < cols; ++j) {
             ctx->col_sum_out[j] += Z->data[INDEX(i, j)];
         }
@@ -616,7 +616,7 @@ static TEE_Result blocked_matrix_decrypt(
 
     for (size_t j = 0; j < cols; ++j) {
         factor += (double)(R->h[j]) / R->value[j];
-        sum += ctx->col_sum_out[R->perm[j]] * R->h[j] / R->value[j];
+        sum += ctx->col_sum_out[R->perm[j]] / R->value[j] * R->h[j] ;
     }
     sum /= factor;
 
@@ -668,17 +668,17 @@ static TEE_Result blocked_matrix_decrypt(
                 row_sum += Z->data[INDEX(i, R->perm[j])] / R->value[j] * R->h[j];
             }
             row_sum /= factor;
-            size_t o_i = i + offset;
+            size_t global_i = i + offset;
             for (size_t j = 0; j < cols; ++j) {
                 size_t n_j = R->perm[j];
                 if (layer_idx == 1) {
-                    out[INDEX(o_i, j)] = Z->data[INDEX(i, j)];
+                    out[INDEX(L->perm[global_i], j)] = Z->data[INDEX(i, j)];
                     continue;
                 }
-                out[INDEX(o_i, j)] = Z->data[INDEX(i, n_j)] / R->value[j] * L->value[o_i] + 
-                                      ctx->col_sum_out[n_j] / R->value[j] * L->h[o_i]     -
-                                                    row_sum / R->value[j] * L->value[o_i] -
-                                                        sum / R->value[j] * L->h[o_i];
+                out[INDEX(global_i, j)] = Z->data[INDEX(i, n_j)] / R->value[j] * L->value[global_i] + 
+                                           ctx->col_sum_out[n_j] / R->value[j] * L->h[global_i]     -
+                                                         row_sum / R->value[j] * L->value[global_i] -
+                                                             sum / R->value[j] * L->h[global_i];
             }
         }
     }

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: BSD-2-Clause
+CFG_CORE_DYN_SHM ?= y
 
 BINARY = 8d1c5322-4a7d-4a3d-9c5f-6f7d31d2b8e1
 

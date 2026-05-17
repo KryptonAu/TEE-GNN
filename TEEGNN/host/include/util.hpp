@@ -12,7 +12,7 @@
 
 namespace teegnn {
 
-#define TA_DATA_SIZE (1 << 23) // 8 * 1024 * 1024 Byte
+#define TA_DATA_SIZE (1 << 22) // 4 * 1024 * 1024 Byte
 
 class SDIMMask {
 public:

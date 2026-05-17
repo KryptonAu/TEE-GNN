@@ -47,12 +47,8 @@ Thumbs.db
 *.d
 
 # Local project directories
-gcn_nonlinear/
 test/
-test_debug/
-common/.build_test/
-optee_client/
-optee_os/
 compile_commands.json
 third_party/
 dataset/
+data/

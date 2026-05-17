@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdexcept>
 #include <utility>
+#include <iostream>
 
 namespace teegnn {
 namespace {
@@ -177,16 +178,23 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
         // keys
         ta_data_size -= TEEGNN_AES128_KEY_LEN * 3;
 
-        ta_data_size -= 1 << 13; // 8192
+        ta_data_size -= 1 << 16; // 64KB for other data structure
 
         double a = std::sqrt((4 + 4 + 8 + 1) * dataset.graph.num_edges());
         double b = std::sqrt(masked_data.num_nodes * masked_data.hidden_dim * sizeof(double));
 
-        block_size = static_cast<uint32_t>(ta_data_size / (a + b) * a);
-        row_block_size = static_cast<uint32_t>(ta_data_size / (a + b) * b);
+        block_size = static_cast<uint32_t>(ta_data_size / (a + b) * a) / 17;
+        row_block_size = static_cast<uint32_t>(ta_data_size / (a + b) * b) / 8 / masked_data.hidden_dim;
         block_size = std::min((size_t)block_size, dataset.graph.num_edges());
         row_block_size = std::min((size_t)row_block_size, masked_data.num_nodes);
+
+        size_t num_blocks = (dataset.graph.num_edges() + block_size - 1) / block_size;
+        size_t num_row_blocks = (masked_data.num_nodes + row_block_size - 1) / row_block_size;
+        block_size = (dataset.graph.num_edges() + num_blocks - 1) / num_blocks;
+        row_block_size = (masked_data.num_nodes + num_row_blocks - 1) / num_row_blocks;
     }
+
+    std::cout << block_size << ' ' << row_block_size << '\n';
 
     secrets.row_block_size = row_block_size;
 
@@ -274,6 +282,8 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
         SDIMMask s_right = SDIMMask::random(masked_data.class_dim, rng_model);
         masked_data.weights.push_back(apply_SDIM(s_left, s_right, dataset.w2));
     }
+
+    std::cout << "Mask phase completed" << std::endl;
 
     return result;
 }

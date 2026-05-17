@@ -27,6 +27,8 @@ bool TEEGNNClient::initialize() {
     if (!checkResult(result, "InitializeContext")) {
         return false;
     }
+
+    std::cout<<"context_.imp.reg_mem:"<<context_.imp.reg_mem<< '\n';
     
     result = TEEC_OpenSession(&context_, &session_, &ta_uuid,
                               TEEC_LOGIN_PUBLIC, NULL, NULL, NULL);
@@ -55,6 +57,8 @@ bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t 
         TEEC_NONE       
     );
 
+    row_block_size = secrets.row_block_size;
+
     std::vector<uint8_t> pack = secret_pack(secrets);
 
     op.params[0].tmpref.buffer = (void*)w1.data();
@@ -73,7 +77,7 @@ bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t 
     return checkResult(result, "InitGNNContext");
 }
 
-bool TEEGNNClient::secure_compute(const EncryptedBlockedEdgeList *lst, Matrix& y) {
+bool TEEGNNClient::secure_compute(EncryptedBlockedEdgeList *lst, Matrix& y) {
     if (!initialized_) {
         std::cerr << "TEE client not initialized" << std::endl;
         return false;
@@ -104,8 +108,9 @@ bool TEEGNNClient::secure_compute(const EncryptedBlockedEdgeList *lst, Matrix& y
 
     uint32_t rows = y.rows();
     uint32_t cols = y.cols();
+    size_t row_blocks = (rows + row_block_size - 1) / row_block_size;
 
-    temp_ciphertext.resize(2 * rows * cols * sizeof(double));
+    temp_ciphertext.resize(row_blocks * (row_block_size + 28) * cols * sizeof(double));
     
     op.params[0].tmpref.buffer = (void*)y.data();
     op.params[0].tmpref.size = rows * cols * sizeof(double);
@@ -114,8 +119,11 @@ bool TEEGNNClient::secure_compute(const EncryptedBlockedEdgeList *lst, Matrix& y
     op.params[1].memref.size = shm.size;
     op.params[1].memref.offset = 0;
 
+    // op.params[1].tmpref.buffer = (void*)lst;
+    // op.params[1].tmpref.size = lst->total_size;
+
     op.params[2].tmpref.buffer = temp_ciphertext.data();
-    op.params[2].tmpref.size = 2 * rows * cols * sizeof(double);
+    op.params[2].tmpref.size = rows * cols * sizeof(double) + 4096;
 
     op.params[3].value.a = rows;        // num_nodes
     op.params[3].value.b = cols;        // feature_dim
@@ -123,6 +131,8 @@ bool TEEGNNClient::secure_compute(const EncryptedBlockedEdgeList *lst, Matrix& y
     TEEC_Result result = TEEC_InvokeCommand(
         &session_, TEEGNN_CMD_SECURE_COMPUTE, &op, NULL);
     
+    TEEC_ReleaseSharedMemory(&shm);
+
     return checkResult(result, "secure compute");
 }
 
@@ -238,6 +248,7 @@ bool TEEGNNClient::checkResult(TEEC_Result result, const std::string& operation)
         }
         return false;
     }
+    std::cout << operation << " succeeded" << std::endl;
     return true;
 }
 

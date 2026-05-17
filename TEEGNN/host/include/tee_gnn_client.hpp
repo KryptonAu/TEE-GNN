@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -21,7 +22,7 @@ public:
     bool init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t feature_dim, uint32_t hidden_dim);
     
     // message passing and activation function
-    bool secure_compute(const EncryptedBlockedEdgeList *lst, Matrix& y);
+    bool secure_compute(EncryptedBlockedEdgeList *lst, Matrix& y);
 
     bool get_debug_info(IntVector& debug_info);
     
@@ -32,6 +33,7 @@ private:
     TEEC_Session session_;
     bool initialized_;
 
+    size_t row_block_size;
     std::vector<uint8_t> temp_ciphertext;
     
     std::vector<uint8_t> secret_pack(const Secrets& secrets);

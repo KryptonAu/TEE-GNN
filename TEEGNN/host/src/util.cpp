@@ -197,6 +197,7 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
     std::cout << block_size << ' ' << row_block_size << '\n';
 
     secrets.row_block_size = row_block_size;
+    secrets.edge_block_size = block_size;
 
     // data owner
     {

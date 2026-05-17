@@ -42,7 +42,9 @@ bool TEEGNNClient::initialize() {
     return true;
 }
 
-bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t feature_dim, uint32_t hidden_dim) {
+bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets,
+                                   uint32_t feature_dim, uint32_t hidden_dim,
+                                   uint32_t num_nodes, uint32_t class_dim) {
     if (!initialized_) {
         std::cerr << "TEE client not initialized" << std::endl;
         return false;
@@ -52,9 +54,9 @@ bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t 
     memset(&op, 0, sizeof(op));
     op.paramTypes = TEEC_PARAM_TYPES(
         TEEC_MEMREF_TEMP_INOUT,   // w1
-        TEEC_MEMREF_TEMP_INPUT,   // seeds and keys
+        TEEC_MEMREF_TEMP_INPUT,   // seeds, keys, and block sizes
         TEEC_VALUE_INPUT,         // feature_dim, hidden_dim
-        TEEC_NONE       
+        TEEC_VALUE_INPUT          // num_nodes, class_dim
     );
 
     row_block_size = secrets.row_block_size;
@@ -68,9 +70,10 @@ bool TEEGNNClient::init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t 
     op.params[1].tmpref.size = pack.size();
 
     op.params[2].value.a = feature_dim;
-    op.params[2].value.b = hidden_dim; 
+    op.params[2].value.b = hidden_dim;
+    op.params[3].value.a = num_nodes;
+    op.params[3].value.b = class_dim;
 
-    
     TEEC_Result result = TEEC_InvokeCommand(
         &session_, TEEGNN_CMD_INIT_CONTEXT, &op, NULL);
     
@@ -180,7 +183,7 @@ void TEEGNNClient::cleanup() {
 
 std::vector<uint8_t> TEEGNNClient::secret_pack(const Secrets& secrets) {
     size_t total_size = 0;
-    total_size += sizeof(uint32_t);
+    total_size += 2 * sizeof(uint32_t);
     total_size += 2 * sizeof(uint64_t);
     total_size += 2 * TEEGNN_AES128_KEY_LEN * sizeof(uint8_t);
     
@@ -188,6 +191,8 @@ std::vector<uint8_t> TEEGNNClient::secret_pack(const Secrets& secrets) {
     size_t offset = 0;
 
     memcpy(pack.data() + offset, &secrets.row_block_size, sizeof(uint32_t));
+    offset += sizeof(uint32_t);
+    memcpy(pack.data() + offset, &secrets.edge_block_size, sizeof(uint32_t));
     offset += sizeof(uint32_t);
 
     memcpy(pack.data() + offset, &secrets.seed_data, sizeof(uint64_t));

@@ -92,8 +92,9 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("Failed to initialize TEE client");
             }
             teegnn::ScopedTimer timer(timings, "teegnn_inference");
-            if (!secure->init_GNNContext(masks.data.weights[0], masks.secrets, 
-                    masks.data.feature_dim, masks.data.hidden_dim)) {
+            if (!secure->init_GNNContext(masks.data.weights[0], masks.secrets,
+                    masks.data.feature_dim, masks.data.hidden_dim,
+                    masks.data.num_nodes, masks.data.class_dim)) {
                 throw std::runtime_error("Failed to initialize GNN context in TEE");
             }
             inference = run_secure_inference(masks.data, secure);

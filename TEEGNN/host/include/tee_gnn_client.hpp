@@ -19,7 +19,9 @@ public:
     
     bool initialize();
     
-    bool init_GNNContext(Matrix& w1, const Secrets& secrets, uint32_t feature_dim, uint32_t hidden_dim);
+    bool init_GNNContext(Matrix& w1, const Secrets& secrets,
+                         uint32_t feature_dim, uint32_t hidden_dim,
+                         uint32_t num_nodes, uint32_t class_dim);
     
     // message passing and activation function
     bool secure_compute(EncryptedBlockedEdgeList *lst, Matrix& y);

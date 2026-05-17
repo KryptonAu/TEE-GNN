@@ -54,6 +54,7 @@ struct Secrets {
     std::array<uint8_t, TEEGNN_AES128_KEY_LEN> key1;
     std::array<uint8_t, TEEGNN_AES128_KEY_LEN> key2;
     uint32_t row_block_size = 1;
+    uint32_t edge_block_size = 1;
 };
 
 struct MaskedData {

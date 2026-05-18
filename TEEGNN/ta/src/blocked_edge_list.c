@@ -37,13 +37,13 @@ static teegnn_status_t edge_block_payload_size(uint32_t block_size, size_t *out)
 
     bs = (size_t)block_size;
     if (teegnn_mul_overflows_size_t(bs, sizeof(uint32_t)) ||
-        teegnn_mul_overflows_size_t(bs, sizeof(double))) {
+        teegnn_mul_overflows_size_t(bs, sizeof(float))) {
         return TEEGNN_ERR_ALLOC;
     }
 
     dsts = bs * sizeof(uint32_t);
     srcs = bs * sizeof(uint32_t);
-    values = bs * sizeof(double);
+    values = bs * sizeof(float);
 
     if (teegnn_add_overflows_size_t(dsts, srcs)) {
         return TEEGNN_ERR_ALLOC;
@@ -277,11 +277,11 @@ static uint32_t load_u32_slot(const uint8_t *data, uint32_t index)
     return value;
 }
 
-static double load_double_slot(const uint8_t *data, uint32_t index)
+static double load_float_slot_as_double(const uint8_t *data, uint32_t index)
 {
-    double value = 0.0;
-    TEE_MemMove(&value, data + (size_t)index * sizeof(double), sizeof(value));
-    return value;
+    float value = 0.0f;
+    TEE_MemMove(&value, data + (size_t)index * sizeof(float), sizeof(value));
+    return (double)value;
 }
 
 static void store_u32_slot(uint8_t *data, uint32_t index, uint32_t value)
@@ -289,9 +289,10 @@ static void store_u32_slot(uint8_t *data, uint32_t index, uint32_t value)
     TEE_MemMove(data + (size_t)index * sizeof(uint32_t), &value, sizeof(value));
 }
 
-static void store_double_slot(uint8_t *data, uint32_t index, double value)
+static void store_float_slot_from_double(uint8_t *data, uint32_t index, double value)
 {
-    TEE_MemMove(data + (size_t)index * sizeof(double), &value, sizeof(value));
+    float wire_value = (float)value;
+    TEE_MemMove(data + (size_t)index * sizeof(float), &wire_value, sizeof(wire_value));
 }
 
 teegnn_status_t encrypted_blocked_edge_list_get_blob_view(
@@ -603,7 +604,7 @@ teegnn_status_t blocked_edge_list_encrypt(
         dsts = payload;
         srcs = dsts + (size_t)block_size * sizeof(uint32_t);
         values = srcs + (size_t)block_size * sizeof(uint32_t);
-        valid = values + (size_t)block_size * sizeof(double);
+        valid = values + (size_t)block_size * sizeof(float);
 
         for (t = 0U; t < block_size; ++t) {
             uint64_t global_pos = (uint64_t)block_id * (uint64_t)block_size + (uint64_t)t;
@@ -612,7 +613,7 @@ teegnn_status_t blocked_edge_list_encrypt(
                 const Edge *e = &A->e_ptr[global_pos];
                 store_u32_slot(dsts, t, (uint32_t)e->dst);
                 store_u32_slot(srcs, t, (uint32_t)e->src);
-                store_double_slot(values, t, e->value);
+                store_float_slot_from_double(values, t, e->value);
                 valid[t] = 1U;
             }
         }
@@ -697,7 +698,7 @@ teegnn_status_t blocked_edge_list_decrypt_full(
         dsts = payload;
         srcs = dsts + (size_t)enc->header.block_size * sizeof(uint32_t);
         values = srcs + (size_t)enc->header.block_size * sizeof(uint32_t);
-        valid = values + (size_t)enc->header.block_size * sizeof(double);
+        valid = values + (size_t)enc->header.block_size * sizeof(float);
 
         for (t = 0U; t < enc->header.block_size; ++t) {
             uint64_t global_pos = (uint64_t)block_id *
@@ -732,11 +733,11 @@ teegnn_status_t blocked_edge_list_decrypt_full(
 
                 tmp.e_ptr[global_pos].src = (int32_t)src;
                 tmp.e_ptr[global_pos].dst = (int32_t)dst;
-                tmp.e_ptr[global_pos].value = load_double_slot(values, t);
+                tmp.e_ptr[global_pos].value = load_float_slot_as_double(values, t);
             } else {
                 uint32_t dst = load_u32_slot(dsts, t);
                 uint32_t src = load_u32_slot(srcs, t);
-                double value = load_double_slot(values, t);
+                double value = load_float_slot_as_double(values, t);
 
                 if (is_valid != 0U || dst != 0U || src != 0U || value != 0.0) {
                     TEE_Free(payload);

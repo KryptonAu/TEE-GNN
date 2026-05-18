@@ -41,7 +41,7 @@ teegnn_status_t decrypt_blob_for_scan(
 
 uint32_t load_u32_slot(const uint8_t *rows, uint32_t index);
 
-double load_double_slot(const uint8_t *values, uint32_t index);
+double load_float_slot_as_double(const uint8_t *values, uint32_t index);
 
 teegnn_status_t validate_col_ptr(
     const uint32_t *col_ptr,

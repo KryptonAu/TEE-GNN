@@ -447,17 +447,58 @@ static void apply_softmax(tee_matrix_t* mat) {
     }
 }
 
+static double load_wire_matrix_value(const float *data, size_t cols, size_t row, size_t col) {
+    return (double)data[row * cols + col];
+}
+
+static void store_wire_matrix_value(float *data, size_t cols, size_t row, size_t col, double value) {
+    data[row * cols + col] = (float)value;
+}
+
+static double load_float_wire_slot_as_double(const uint8_t *data, size_t index) {
+    float value = 0.0f;
+    TEE_MemMove(&value, data + index * sizeof(float), sizeof(value));
+    return (double)value;
+}
+
+static void store_float_wire_slot_from_double(uint8_t *data, size_t index, double value) {
+    float wire_value = (float)value;
+    TEE_MemMove(data + index * sizeof(float), &wire_value, sizeof(wire_value));
+}
+
+static void matrix_to_float_wire_inplace(tee_matrix_t *mat) {
+    uint8_t *wire = (uint8_t *)mat->data;
+    const size_t total = (size_t)mat->rows * (size_t)mat->cols;
+
+    /* Forward conversion does not clobber unread double slots. */
+    for (size_t i = 0; i < total; ++i) {
+        store_float_wire_slot_from_double(wire, i, mat->data[i]);
+    }
+}
+
+static void matrix_from_float_wire_inplace(tee_matrix_t *mat) {
+    uint8_t *wire = (uint8_t *)mat->data;
+    const size_t total = (size_t)mat->rows * (size_t)mat->cols;
+
+    /* Reverse conversion avoids overwriting unread float slots. */
+    for (size_t i = total; i > 0; --i) {
+        const size_t index = i - 1U;
+        mat->data[index] = load_float_wire_slot_as_double(wire, index);
+    }
+}
+
 // stream scan for unmasked Y
-static void get_row(const double* Y, uint32_t i, SDIM *L, SDIM *R) {
-    size_t rows = L->n;
+static void get_row(const float* Y, uint32_t i, SDIM *L, SDIM *R) {
     size_t cols = R->n;
     double row_sum = 0.0;
     for (size_t j = 0; j < cols; ++j) {
-        row_sum += Y[INDEX(i, j)] / L->value[i] * R->h[j];
+        const double y_value = load_wire_matrix_value(Y, cols, i, j);
+        row_sum += y_value / L->value[i] * R->h[j];
     }
     for (size_t j = 0; j < cols; ++j) {
         int n_j = R->perm[j];
-        ctx->temp_row[n_j] = Y[INDEX(i, j)] / L->value[i] * R->value[j] + row_sum -
+        const double y_value = load_wire_matrix_value(Y, cols, i, j);
+        ctx->temp_row[n_j] = y_value / L->value[i] * R->value[j] + row_sum -
                             ctx->col_sum[j] / L->value[i] * L->h[i]     -
                                    ctx->sum / L->value[i] * L->h[i];
     }
@@ -522,6 +563,7 @@ static TEE_Result blocked_matrix_encrypt(
         );
     }
     if (st == TEEGNN_OK) {
+        matrix_to_float_wire_inplace(Z);
         st = teegnn_aes_gcm_encrypt(
             key,
             key_len,
@@ -544,7 +586,7 @@ static TEE_Result blocked_edge_list_stream_scan(
     const EncryptedBlockedEdgeList *enc,
     const uint8_t *key,
     size_t key_len,
-    const double *Y,
+    const float *Y,
     tee_matrix_t *Z,
     uint32_t layer_idx,
     uint8_t *ciphertext
@@ -607,7 +649,7 @@ static TEE_Result blocked_edge_list_stream_scan(
         const uint8_t *dsts = payload;
         const uint8_t *srcs = dsts + (size_t)enc->header.block_size * sizeof(uint32_t);
         const uint8_t *values = srcs + (size_t)enc->header.block_size * sizeof(uint32_t);
-        const uint8_t *valid = values + (size_t)enc->header.block_size * sizeof(double);
+        const uint8_t *valid = values + (size_t)enc->header.block_size * sizeof(float);
 
         for (uint32_t t = 0; t < enc->header.block_size; ++t) {
             const uint64_t global_pos = (uint64_t)block_id * enc->header.block_size + t;
@@ -618,7 +660,7 @@ static TEE_Result blocked_edge_list_stream_scan(
             if (global_pos >= enc->header.m_edges) {
                 const uint32_t dst = load_u32_slot(dsts, t);
                 const uint32_t src = load_u32_slot(srcs, t);
-                const double value = load_double_slot(values, t);
+                const double value = load_float_slot_as_double(values, t);
                 if (is_valid != 0U || dst != 0U || src != 0U || value != 0.0) {
                     return TEE_ERROR_BAD_FORMAT;
                 }
@@ -670,7 +712,7 @@ static TEE_Result blocked_edge_list_stream_scan(
                 return TEE_ERROR_BAD_PARAMETERS;
             }
 
-            const double value = load_double_slot(values, t);
+            const double value = load_float_slot_as_double(values, t);
             for (uint32_t f = 0; f < cols; ++f) {
                 Z->data[INDEX(dst % row_block_size, f)] += value * ctx->temp_row[f];
             }
@@ -706,7 +748,7 @@ static TEE_Result blocked_edge_list_stream_scan(
 
 static TEE_Result blocked_matrix_decrypt(
     tee_matrix_t *Z,
-    double *out,
+    float *out,
     SDIM *L,
     SDIM *R,
     const uint8_t *ciphertext,
@@ -783,6 +825,7 @@ static TEE_Result blocked_matrix_decrypt(
         if (st != TEEGNN_OK) {
             return TEE_ERROR_BAD_STATE;
         }
+        matrix_from_float_wire_inplace(Z);
 
         // write to REE
         uint32_t offset = row_block_id * row_block_size;
@@ -799,13 +842,15 @@ static TEE_Result blocked_matrix_decrypt(
             for (size_t j = 0; j < cols; ++j) {
                 size_t n_j = R->perm[j];
                 if (layer_idx == 1) {
-                    out[INDEX(L->perm[global_i], j)] = Z->data[INDEX(i, j)];
+                    store_wire_matrix_value(out, cols, (size_t)L->perm[global_i], j, Z->data[INDEX(i, j)]);
                     continue;
                 }
-                out[INDEX(global_i, j)] = Z->data[INDEX(i, n_j)] / R->value[j] * L->value[global_i] + 
-                                           ctx->col_sum_out[n_j] / R->value[j] * L->h[global_i]     -
-                                                         row_sum / R->value[j] * L->value[global_i] -
-                                                             sum / R->value[j] * L->h[global_i];
+                const double out_value =
+                    Z->data[INDEX(i, n_j)] / R->value[j] * L->value[global_i] +
+                    ctx->col_sum_out[n_j] / R->value[j] * L->h[global_i] -
+                    row_sum / R->value[j] * L->value[global_i] -
+                    sum / R->value[j] * L->h[global_i];
+                store_wire_matrix_value(out, cols, global_i, j, out_value);
             }
         }
     }
@@ -997,8 +1042,12 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     );
 
     TEE_Result res;
+    teegnn_status_t st;
     size_t y_elements = 0;
     size_t y_bytes = 0;
+    uint32_t matrix_blocks = 0;
+    size_t matrix_block_stride = 0;
+    size_t ciphertext_bytes = 0;
     if (param_types != exp_param_types) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
@@ -1007,7 +1056,7 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     }
 
     // parse parameters
-    double* y = (double*)params[0].memref.buffer;
+    float* y = (float*)params[0].memref.buffer;
     EncryptedBlockedEdgeList* enc = (EncryptedBlockedEdgeList *)params[1].memref.buffer;
     uint8_t *ciphertext = params[2].memref.buffer;
     uint32_t rows = params[3].value.a;
@@ -1030,8 +1079,19 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     if (res != TEE_SUCCESS) {
         return res;
     }
-    y_bytes = y_elements * sizeof(double);
+    if (y_elements > SIZE_MAX / sizeof(float)) {
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+    y_bytes = y_elements * sizeof(float);
     if (params[0].memref.size < y_bytes) {
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+    st = matrix_block_layout(ctx->row_block_size, rows, cols, &matrix_blocks, NULL, &matrix_block_stride);
+    if (st != TEEGNN_OK || mul_overflows_size_t((size_t)matrix_blocks, matrix_block_stride)) {
+        return TEE_ERROR_BAD_PARAMETERS;
+    }
+    ciphertext_bytes = (size_t)matrix_blocks * matrix_block_stride;
+    if (params[2].memref.size < ciphertext_bytes) {
         return TEE_ERROR_BAD_PARAMETERS;
     }
 
@@ -1065,8 +1125,9 @@ static TEE_Result secure_compute(uint32_t param_types, TEE_Param params[4]) {
     ctx->factor = 1.0;
     for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
-            ctx->sum += y[INDEX(i, j)] / L->value[i] * R->h[j];
-            col_sum[j] += y[INDEX(i, j)] / L->value[i] * R->value[j];
+            const double y_value = load_wire_matrix_value(y, cols, i, j);
+            ctx->sum += y_value / L->value[i] * R->h[j];
+            col_sum[j] += y_value / L->value[i] * R->value[j];
         }
         ctx->factor += (double)(L->h[i]) / L->value[i];
     }

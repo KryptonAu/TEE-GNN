@@ -87,12 +87,12 @@ teegnn_status_t edge_block_payload_size(uint32_t block_size, size_t *out) {
     }
     const size_t bs = (size_t)block_size;
     if (mul_overflows_size_t(bs, sizeof(uint32_t)) ||
-        mul_overflows_size_t(bs, sizeof(double))) {
+        mul_overflows_size_t(bs, sizeof(float))) {
         return TEEGNN_ERR_ALLOC;
     }
     const size_t dsts = bs * sizeof(uint32_t);
     const size_t srcs = bs * sizeof(uint32_t);
-    const size_t values = bs * sizeof(double);
+    const size_t values = bs * sizeof(float);
     if (dsts > SIZE_MAX - srcs ||
         dsts + srcs > SIZE_MAX - values ||
         dsts + srcs + values > SIZE_MAX - bs) {
@@ -229,10 +229,10 @@ uint32_t load_u32_slot(const uint8_t *rows, uint32_t index) {
     return value;
 }
 
-double load_double_slot(const uint8_t *values, uint32_t index) {
-    double value = 0.0;
-    TEE_MemMove(&value, values + (size_t)index * sizeof(double), sizeof(value));
-    return value;
+double load_float_slot_as_double(const uint8_t *values, uint32_t index) {
+    float value = 0.0f;
+    TEE_MemMove(&value, values + (size_t)index * sizeof(float), sizeof(value));
+    return (double)value;
 }
 
 teegnn_status_t validate_col_ptr(
@@ -275,8 +275,14 @@ teegnn_status_t matrix_block_layout(
     const uint32_t n_blocks = rows == 0
         ? 0U
         : (uint32_t)(((uint64_t)rows + row_block_size - 1U) / row_block_size);
-    const size_t block_payload_len =
-        (size_t)row_block_size * (size_t)cols * sizeof(double);
+    if (mul_overflows_size_t((size_t)row_block_size, (size_t)cols)) {
+        return TEEGNN_ERR_ALLOC;
+    }
+    const size_t elements = (size_t)row_block_size * (size_t)cols;
+    if (mul_overflows_size_t(elements, sizeof(float))) {
+        return TEEGNN_ERR_ALLOC;
+    }
+    const size_t block_payload_len = elements * sizeof(float);
 
     if (blocks != NULL) {
         *blocks = n_blocks;

@@ -23,13 +23,13 @@ static teegnn_status_t edge_block_payload_size(uint32_t block_size, size_t *out)
 
     const size_t bs = (size_t)block_size;
     if (mul_overflows_size_t(bs, sizeof(uint32_t)) ||
-        mul_overflows_size_t(bs, sizeof(double))) {
+        mul_overflows_size_t(bs, sizeof(float))) {
         return TEEGNN_ERR_ALLOC;
     }
 
     const size_t srcs = bs * sizeof(uint32_t);
     const size_t dsts = bs * sizeof(uint32_t);
-    const size_t values = bs * sizeof(double);
+    const size_t values = bs * sizeof(float);
     if (add_overflows_size_t(dsts, srcs) ||
         add_overflows_size_t(dsts + srcs, values) ||
         add_overflows_size_t(dsts + srcs + values, bs)) {
@@ -217,18 +217,19 @@ static uint32_t load_u32_slot(const uint8_t *data, uint32_t index) {
     return value;
 }
 
-static double load_double_slot(const uint8_t *data, uint32_t index) {
-    double value = 0.0;
-    memcpy(&value, data + (size_t)index * sizeof(double), sizeof(value));
-    return value;
+static double load_float_slot_as_double(const uint8_t *data, uint32_t index) {
+    float value = 0.0f;
+    memcpy(&value, data + (size_t)index * sizeof(float), sizeof(value));
+    return (double)value;
 }
 
 static void store_u32_slot(uint8_t *data, uint32_t index, uint32_t value) {
     memcpy(data + (size_t)index * sizeof(uint32_t), &value, sizeof(value));
 }
 
-static void store_double_slot(uint8_t *data, uint32_t index, double value) {
-    memcpy(data + (size_t)index * sizeof(double), &value, sizeof(value));
+static void store_float_slot_from_double(uint8_t *data, uint32_t index, double value) {
+    float wire_value = (float)value;
+    memcpy(data + (size_t)index * sizeof(float), &wire_value, sizeof(wire_value));
 }
 
 teegnn_status_t encrypted_blocked_edge_list_get_blob_view(
@@ -500,7 +501,7 @@ teegnn_status_t blocked_edge_list_encrypt(
         uint8_t *dsts = payload;
         uint8_t *srcs = dsts + (size_t)block_size * sizeof(uint32_t);
         uint8_t *values = srcs + (size_t)block_size * sizeof(uint32_t);
-        uint8_t *valid = values + (size_t)block_size * sizeof(double);
+        uint8_t *valid = values + (size_t)block_size * sizeof(float);
 
         for (uint32_t t = 0; t < block_size; ++t) {
             const uint64_t global_pos = (uint64_t)block_id * block_size + t;
@@ -508,7 +509,7 @@ teegnn_status_t blocked_edge_list_encrypt(
                 const Edge *e = &A->e_ptr[global_pos];
                 store_u32_slot(dsts, t, (uint32_t)e->dst);
                 store_u32_slot(srcs, t, (uint32_t)e->src);
-                store_double_slot(values, t, e->value);
+                store_float_slot_from_double(values, t, e->value);
                 valid[t] = 1U;
             }
         }
@@ -587,7 +588,7 @@ teegnn_status_t blocked_edge_list_decrypt_full(
         const uint8_t *dsts = payload;
         const uint8_t *srcs = dsts + (size_t)enc->header.block_size * sizeof(uint32_t);
         const uint8_t *values = srcs + (size_t)enc->header.block_size * sizeof(uint32_t);
-        const uint8_t *valid = values + (size_t)enc->header.block_size * sizeof(double);
+        const uint8_t *valid = values + (size_t)enc->header.block_size * sizeof(float);
 
         for (uint32_t t = 0; t < enc->header.block_size; ++t) {
             const uint64_t global_pos = (uint64_t)block_id * enc->header.block_size + t;
@@ -613,11 +614,11 @@ teegnn_status_t blocked_edge_list_decrypt_full(
                 }
                 tmp.e_ptr[global_pos].src = (int32_t)src;
                 tmp.e_ptr[global_pos].dst = (int32_t)dst;
-                tmp.e_ptr[global_pos].value = load_double_slot(values, t);
+                tmp.e_ptr[global_pos].value = load_float_slot_as_double(values, t);
             } else {
                 const uint32_t dst = load_u32_slot(dsts, t);
                 const uint32_t src = load_u32_slot(srcs, t);
-                const double value = load_double_slot(values, t);
+                const double value = load_float_slot_as_double(values, t);
                 if (is_valid != 0U || dst != 0U || src != 0U || value != 0.0) {
                     free(payload);
                     edge_list_free(&tmp);

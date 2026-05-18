@@ -180,11 +180,14 @@ MaskPhaseResult run_mask_phase(const Dataset& dataset, const Options& options) {
 
         ta_data_size -= 1 << 16; // 64KB for other data structure
 
-        double a = std::sqrt((4 + 4 + 8 + 1) * dataset.graph.num_edges());
-        double b = std::sqrt(masked_data.num_nodes * masked_data.hidden_dim * sizeof(double));
+        size_t edge_unit_size = 2 * sizeof(uint32_t) + sizeof(float) + 1;
+        size_t matrix_unit_size = sizeof(double);
 
-        block_size = static_cast<uint32_t>(ta_data_size / (a + b) * a) / 17;
-        row_block_size = static_cast<uint32_t>(ta_data_size / (a + b) * b) / 8 / masked_data.hidden_dim;
+        double a = std::sqrt(edge_unit_size * dataset.graph.num_edges());
+        double b = std::sqrt(matrix_unit_size * masked_data.num_nodes * masked_data.hidden_dim);
+
+        block_size = static_cast<uint32_t>(ta_data_size / (a + b) * a) / edge_unit_size;
+        row_block_size = static_cast<uint32_t>(ta_data_size / (a + b) * b) / matrix_unit_size / masked_data.hidden_dim;
         block_size = std::min((size_t)block_size, dataset.graph.num_edges());
         row_block_size = std::min((size_t)row_block_size, masked_data.num_nodes);
 

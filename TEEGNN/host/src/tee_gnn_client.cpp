@@ -85,6 +85,28 @@ bool TEEGNNClient::secure_compute(EncryptedBlockedEdgeList *lst, Matrix& y) {
         std::cerr << "TEE client not initialized" << std::endl;
         return false;
     }
+    if (lst == nullptr || row_block_size == 0) {
+        std::cerr << "Invalid secure_compute arguments" << std::endl;
+        return false;
+    }
+
+    uint32_t rows = y.rows();
+    uint32_t cols = y.cols();
+    const size_t y_elements = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+
+    std::vector<float> y_wire(y_elements);
+    const double *y_data = y.data();
+    for (size_t i = 0; i < y_elements; ++i) {
+        y_wire[i] = static_cast<float>(y_data[i]);
+    }
+
+    const size_t row_blocks = (rows + row_block_size - 1) / row_block_size;
+    const size_t matrix_block_payload =
+        row_block_size * static_cast<size_t>(cols) * sizeof(float);
+    const size_t matrix_block_stride =
+        TEEGNN_GCM_NONCE_LEN + TEEGNN_GCM_TAG_LEN + matrix_block_payload;
+    temp_ciphertext.resize(row_blocks * matrix_block_stride);
+
     TEEC_Result res;
     TEEC_SharedMemory shm;
     std::memset(&shm, 0, sizeof(shm));
@@ -104,39 +126,37 @@ bool TEEGNNClient::secure_compute(EncryptedBlockedEdgeList *lst, Matrix& y) {
     memset(&op, 0, sizeof(op));
     op.paramTypes = TEEC_PARAM_TYPES(
         TEEC_MEMREF_TEMP_INOUT,
-        TEEC_MEMREF_WHOLE, 
+        TEEC_MEMREF_WHOLE,
         TEEC_MEMREF_TEMP_INOUT,
         TEEC_VALUE_INPUT
     );
 
-    uint32_t rows = y.rows();
-    uint32_t cols = y.cols();
-    size_t row_blocks = (rows + row_block_size - 1) / row_block_size;
+    op.params[0].tmpref.buffer = y_wire.data();
+    op.params[0].tmpref.size = y_wire.size() * sizeof(float);
 
-    temp_ciphertext.resize(row_blocks * (row_block_size + 28) * cols * sizeof(double));
-    
-    op.params[0].tmpref.buffer = (void*)y.data();
-    op.params[0].tmpref.size = rows * cols * sizeof(double);
-    
     op.params[1].memref.parent = &shm;
     op.params[1].memref.size = shm.size;
     op.params[1].memref.offset = 0;
 
-    // op.params[1].tmpref.buffer = (void*)lst;
-    // op.params[1].tmpref.size = lst->total_size;
-
     op.params[2].tmpref.buffer = temp_ciphertext.data();
-    op.params[2].tmpref.size = rows * cols * sizeof(double) + 4096;
+    op.params[2].tmpref.size = temp_ciphertext.size();
 
     op.params[3].value.a = rows;        // num_nodes
     op.params[3].value.b = cols;        // feature_dim
-    
+
     TEEC_Result result = TEEC_InvokeCommand(
         &session_, TEEGNN_CMD_SECURE_COMPUTE, &op, NULL);
-    
+
     TEEC_ReleaseSharedMemory(&shm);
 
-    return checkResult(result, "secure compute");
+    const bool ok = checkResult(result, "secure compute");
+    if (ok) {
+        double *y_out = y.data();
+        for (size_t i = 0; i < y_elements; ++i) {
+            y_out[i] = static_cast<double>(y_wire[i]);
+        }
+    }
+    return ok;
 }
 
 bool TEEGNNClient::get_debug_info(IntVector& debug_info) {
